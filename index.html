@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <title>NVIDIA Video Editor</title>
+  <link rel="stylesheet" href="/styles.css?v=0.14.0">
+</head>
+<body>
+  <header class="toolbar">
+    <input id="media-input" type="file" accept="video/*,audio/*,image/jpeg,image/png,image/webp,image/bmp,image/tiff,image/svg+xml,.svg" multiple hidden>
+    <input id="project-input" type="file" accept=".json" hidden>
+
+    <div class="toolbar-actions">
+      <button id="new-project" class="toolbar-btn" title="Nytt projekt">New</button>
+      <button id="save-project" class="toolbar-btn" title="Spara projekt">💾</button>
+      <button id="load-project" class="toolbar-btn" title="Öppna projekt">📂</button>
+    </div>
+
+    <button id="import-files" class="toolbar-btn" title="Importera mediafiler">Importera filer</button>
+
+    <div class="menu">
+      <button class="menu-toggle" aria-haspopup="true" aria-expanded="false">Redigera ▾</button>
+      <div class="menu-dropdown">
+        <button id="add-blur">Lägg till blur</button>
+        <button id="add-text">Lägg till text</button>
+        <button id="add-color">Lägg till färgblock</button>
+        <button id="add-transition">Lägg till övergång</button>
+        <button id="split" aria-keyshortcuts="S" title="Dela vid spelhuvud (S)">Dela vid spelhuvud</button>
+        <button id="remove" aria-keyshortcuts="Delete Backspace" title="Ta bort markerat klipp (Delete)" disabled>Ta bort</button>
+      </div>
+    </div>
+
+    <div class="menu">
+      <button class="menu-toggle" aria-haspopup="true" aria-expanded="false">Ljud ▾</button>
+      <div class="menu-dropdown">
+        <button id="separate-audio" title="Extrahera ljudet från valt video-klipp till ett eget ljudspår">Separera ljud</button>
+        <label class="hardware menu-item">Ord per visning <input id="transcript-words" type="number" min="1" max="20" value="3" style="width:3.5em"></label>
+      </div>
+    </div>
+
+    <div class="menu">
+      <button class="menu-toggle" aria-haspopup="true" aria-expanded="false">Export ▾</button>
+      <div class="menu-dropdown">
+        <label class="menu-item canvas-format-control">Videoformat
+          <select id="canvas-format">
+            <option value="source">Källformat</option>
+            <option value="16:9">16:9 · 1920×1080</option>
+            <option value="9:16">9:16 · 1080×1920</option>
+            <option value="1:1">1:1 · 1080×1080</option>
+            <option value="4:5">4:5 · 1080×1350</option>
+            <option value="21:9">21:9 · 2560×1080</option>
+            <option value="custom">Egen storlek</option>
+          </select>
+        </label>
+        <div id="custom-canvas-size" class="custom-canvas-size" hidden>
+          <label>Bredd <input id="canvas-width" type="number" min="64" max="4096" step="2" value="1920"></label>
+          <span>×</span>
+          <label>Höjd <input id="canvas-height" type="number" min="64" max="4096" step="2" value="1080"></label>
+        </div>
+        <label class="hardware menu-item">Kvalitet
+          <output id="quality-label">3</output>
+          <input id="export-quality" type="range" min="1" max="5" step="1" value="3">
+          <span class="quality-range-label">1 (låg) – 5 (lossless)</span>
+        </label>
+        <label class="hardware menu-item"><input id="use-nvidia" type="checkbox" checked> NVIDIA NVENC</label>
+        <label class="hardware menu-item"><input id="use-upscale" type="checkbox"> AI upscaling</label>
+        <button class="export" id="export">Exportera MP4</button>
+        <button id="export-mp3">Exportera ljud som MP3</button>
+        <button id="export-wav">Exportera ljud som WAV</button>
+      </div>
+    </div>
+
+    <button id="ai-editing" class="ai-editing-button" type="button" aria-haspopup="dialog" aria-controls="ai-editing-modal">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 2.8c.7 4.8 3.4 7.5 8.2 8.2-4.8.7-7.5 3.4-8.2 8.2-.7-4.8-3.4-7.5-8.2-8.2C8.6 10.3 11.3 7.6 12 2.8Z"/>
+        <path d="M19 2.5c.2 1.4 1.1 2.3 2.5 2.5-1.4.2-2.3 1.1-2.5 2.5-.2-1.4-1.1-2.3-2.5-2.5 1.4-.2 2.3-1.1 2.5-2.5Z"/>
+      </svg>
+      AI-redigering
+    </button>
+
+    <span id="status" class="status">Ansluter…</span>
+
+    <div class="history-wrap">
+      <button id="history-toggle" class="history-btn" title="Historik">⏱</button>
+      <div id="history-panel" class="history-panel" hidden>
+        <div class="history-header">Historik</div>
+        <div id="history-list" class="history-list"></div>
+      </div>
+    </div>
+  </header>
+
+  <div class="editor-body">
+    <div class="editor-main">
+      <main class="preview-area">
+        <div class="preview-window">
+          <video id="preview" preload="metadata"></video>
+          <img id="image-preview" alt="Förhandsvisning av bild" hidden>
+          <audio id="timeline-audio" preload="metadata" hidden></audio>
+          <div id="blur-layer" class="blur-layer" aria-hidden="true"></div>
+          <div id="transcript-overlay" class="transcript-overlay" aria-hidden="true" hidden></div>
+          <div id="crop-overlay" class="crop-overlay" aria-hidden="true" hidden>
+            <div class="crop-mask" id="crop-mask-t"></div>
+            <div class="crop-mask" id="crop-mask-b"></div>
+            <div class="crop-mask" id="crop-mask-l"></div>
+            <div class="crop-mask" id="crop-mask-r"></div>
+            <div class="crop-pan" id="crop-pan"></div>
+            <button type="button" class="crop-handle crop-handle-l" data-side="left" aria-label="Vänster kant"></button>
+            <button type="button" class="crop-handle crop-handle-r" data-side="right" aria-label="Höger kant"></button>
+            <button type="button" class="crop-handle crop-handle-t" data-side="top" aria-label="Övre kant"></button>
+            <button type="button" class="crop-handle crop-handle-b" data-side="bottom" aria-label="Nedre kant"></button>
+            <button type="button" class="crop-handle crop-handle-tl" data-side="tl" aria-label="Övre vänstra hörn"></button>
+            <button type="button" class="crop-handle crop-handle-tr" data-side="tr" aria-label="Övre högra hörn"></button>
+            <button type="button" class="crop-handle crop-handle-bl" data-side="bl" aria-label="Nedre vänstra hörn"></button>
+            <button type="button" class="crop-handle crop-handle-br" data-side="br" aria-label="Nedre högra hörn"></button>
+          </div>
+          <div id="visual-scale-overlay" class="visual-scale-overlay" hidden>
+            <button type="button" data-corner="nw" aria-label="Skala från övre vänstra hörnet"></button>
+            <button type="button" data-corner="ne" aria-label="Skala från övre högra hörnet"></button>
+            <button type="button" data-corner="sw" aria-label="Skala från nedre vänstra hörnet"></button>
+            <button type="button" data-corner="se" aria-label="Skala från nedre högra hörnet"></button>
+          </div>
+          <span id="preview-placeholder">LADDA ETT VIDEOKLIPP</span>
+          <div id="export-frame-outline" class="export-frame-outline" aria-hidden="true"></div>
+          <div id="export-frame-label" class="export-frame-label">EXPORTYTA · 16:9 · 1600×900</div>
+        </div>
+      </main>
+      <aside class="tools-panel" id="tools-panel">
+        <section id="crop-tools" class="crop-tools" aria-label="Beskär markerat klipp" hidden>
+        <div class="crop-heading">
+          <strong>Beskär markerat klipp</strong>
+          <button id="crop-done" type="button" class="crop-action">Klar</button>
+          <button id="crop-cancel" type="button" class="crop-action">Avbryt</button>
+          <button id="reset-crop" type="button">Återställ</button>
+        </div>
+      </section>
+      <section id="blur-tools" class="blur-tools" aria-label="Anpassa markerad blur" hidden>
+        <div class="crop-heading">
+          <strong>Forma markerad blur</strong>
+          <button id="reset-blur" type="button">Återställ</button>
+        </div>
+        <div class="blur-grid">
+          <p>Dra de fyra punkterna direkt i previewn för att forma ett fritt blur-område.</p>
+          <label>Styrka <output id="blur-strength-value">20</output><input class="blur-input" data-property="strength" type="range" min="1" max="40" step="1" value="20"></label>
+          <button id="add-blur-box" type="button" class="text-anim-btn">Lägg till box</button>
+        </div>
+      </section>
+      <section id="color-tools" class="color-tools" aria-label="Anpassa markerat färgblock" hidden>
+        <div class="crop-heading">
+          <strong>Färgblock</strong>
+        </div>
+        <div class="color-grid">
+          <label>Färg <input class="color-input" data-property="color" type="color" value="#e50914"></label>
+          <label>X <output class="val-color-x">50</output><input class="color-input" data-property="x" type="range" min="0" max="1" step="0.01" value="0.5"></label>
+          <label>Y <output class="val-color-y">50</output><input class="color-input" data-property="y" type="range" min="0" max="1" step="0.01" value="0.5"></label>
+          <label>Bredd <output class="val-color-width">100</output><input class="color-input" data-property="width" type="range" min="0.05" max="1" step="0.01" value="1"></label>
+          <label>Höjd <output class="val-color-height">100</output><input class="color-input" data-property="height" type="range" min="0.05" max="1" step="0.01" value="1"></label>
+        </div>
+      </section>
+      <section id="anim-tools" class="anim-tools" aria-label="In-animation för bild" hidden>
+        <div class="crop-heading">
+          <strong>In-animation</strong>
+        </div>
+        <div class="anim-grid">
+          <button type="button" class="anim-btn" data-anim="none">Ingen</button>
+          <button type="button" class="anim-btn" data-anim="fade">Tona in</button>
+          <button type="button" class="anim-btn" data-anim="scale">Zooma in</button>
+          <button type="button" class="anim-btn" data-anim="slide-up">Glid upp</button>
+          <label class="anim-dur-label">Längd
+            <output id="anim-dur-value">0.5 s</output>
+            <input id="anim-duration" type="range" min="0.1" max="3" step="0.1" value="0.5">
+          </label>
+        </div>
+      </section>
+      <section id="text-tools" class="text-tools" aria-label="Anpassa markerad text" hidden>
+        <div class="crop-heading">
+          <strong>Redigera text</strong>
+        </div>
+        <div class="text-presets" aria-label="Förinställda textdesigner">
+          <button type="button" class="text-preset preset-simple" data-text-preset="simple"><span class="preset-stage"><span>Text</span></span><strong>Enkel</strong><small>Ingen anim.</small></button>
+          <button type="button" class="text-preset preset-slide" data-text-preset="slide"><span class="preset-stage"><span>← Slide</span></span><strong>Glid in</strong><small>Vänster → ton</small></button>
+          <button type="button" class="text-preset preset-scale" data-text-preset="scale"><span class="preset-stage"><span>POP</span></span><strong>Skala</strong><small>Zooma in/ut</small></button>
+          <button type="button" class="text-preset preset-typewriter" data-text-preset="typewriter"><span class="preset-stage"><span>KOD_</span></span><strong>Typewriter</strong><small>Bokstav för bokstav</small></button>
+        </div>
+        <div class="text-grid">
+          <div class="preset-panel" data-preset="simple">
+            <label class="text-full">Text <textarea class="text-input" data-property="text" rows="3" maxlength="200"></textarea></label>
+            <label>Färg <input class="text-input" data-property="color" type="color" value="#FFFFFF"></label>
+            <label>Storlek <output class="val-font-size">9%</output><input class="text-input" data-property="fontSize" type="range" min="1" max="50" step="1" value="9"></label>
+            <div class="text-posrow">
+              <label>X <input class="text-input" data-property="x" type="number" min="0" max="100" step="1" value="50"></label>
+              <label>Y <input class="text-input" data-property="y" type="number" min="0" max="100" step="1" value="50"></label>
+              <button type="button" class="center-text-btn" data-action="center">Centrera</button>
+            </div>
+          </div>
+          <div class="preset-panel" data-preset="slide">
+            <label class="text-full">Text <textarea class="text-input" data-property="text" rows="3" maxlength="200"></textarea></label>
+            <label>Färg <input class="text-input" data-property="color" type="color" value="#FFFFFF"></label>
+            <label>Storlek <output class="val-font-size">7%</output><input class="text-input" data-property="fontSize" type="range" min="1" max="50" step="1" value="7"></label>
+            <div class="text-posrow">
+              <label>X <input class="text-input" data-property="x" type="number" min="0" max="100" step="1" value="50"></label>
+              <label>Y <input class="text-input" data-property="y" type="number" min="0" max="100" step="1" value="50"></label>
+              <button type="button" class="center-text-btn" data-action="center">Centrera</button>
+            </div>
+          </div>
+          <div class="preset-panel" data-preset="scale">
+            <label class="text-full">Text <textarea class="text-input" data-property="text" rows="3" maxlength="200"></textarea></label>
+            <label>Färg <input class="text-input" data-property="color" type="color" value="#FFFFFF"></label>
+            <label>Storlek <output class="val-font-size">11%</output><input class="text-input" data-property="fontSize" type="range" min="1" max="50" step="1" value="11"></label>
+            <label>Skala <output class="val-scale">112%</output><input class="text-input" data-property="scaleX" type="range" min="10" max="600" step="1" value="112"></label>
+            <div class="text-posrow">
+              <label>X <input class="text-input" data-property="x" type="number" min="0" max="100" step="1" value="50"></label>
+              <label>Y <input class="text-input" data-property="y" type="number" min="0" max="100" step="1" value="50"></label>
+              <button type="button" class="center-text-btn" data-action="center">Centrera</button>
+            </div>
+          </div>
+          <div class="preset-panel" data-preset="typewriter">
+            <label class="text-full">Text <input class="text-input" data-property="text" type="text" maxlength="200"></label>
+            <label>Färg <input class="text-input" data-property="color" type="color" value="#69F0AE"></label>
+            <label>Hastighet <output class="val-anim-dur">1.4 s</output><input class="text-input" data-property="animInDuration" type="range" min="0.2" max="4" step="0.1" value="1.4"></label>
+          </div>
+        </div>
+        <p class="text-hint">Dra texten direkt i förhandsvisningen för fri positionering.</p>
+      </section>
+      <section id="audio-tools" class="audio-tools" aria-label="Ljudanalys och brusreducering" hidden>
+        <div class="crop-heading">
+          <strong>Ljudanalys</strong>
+        </div>
+        <canvas id="audio-waveform" class="audio-waveform" width="400" height="120"></canvas>
+        <div id="waveform-time" class="waveform-time"></div>
+        <div class="audio-tools-section">
+          <strong>Capture Noise Print</strong>
+          <p class="audio-hint">Dra i vågformen för att markera en kort del med enbart bakgrundsbrus, eller ange start/längd manuellt. Klicka på "Fånga".</p>
+          <div class="audio-param-row">
+            <label>Start (s) <input id="noise-print-start" class="audio-input" type="number" min="0" step="0.1" value="0"></label>
+            <label>Längd (s) <input id="noise-print-length" class="audio-input" type="number" min="0.1" max="5" step="0.1" value="0.5"></label>
+          </div>
+          <button id="capture-noise-print" type="button" class="audio-action-btn">Fånga brusprofil</button>
+          <div id="noise-print-status" class="noise-print-status">Ingen brusprofil fångad</div>
+        </div>
+        <div class="audio-tools-section">
+          <strong>Noise Reduction</strong>
+          <label>Reducering <output id="nr-amount-value">80</output>%<input id="nr-amount" type="range" min="0" max="98" step="1" value="80"></label>
+          <button id="apply-noise-reduction" type="button" class="audio-action-btn" disabled>Applicera brusreducering</button>
+        </div>
+        <div class="audio-tools-section">
+          <strong>Noise Gate</strong>
+          <label>Tröskel (0–100%) <output id="gate-threshold-value">5</output>%<input id="gate-threshold" type="range" min="0.1" max="50" step="0.5" value="5"></label>
+          <label>Attack <output id="gate-attack-value">2</output> ms<input id="gate-attack" type="range" min="0.1" max="50" step="0.5" value="2"></label>
+          <label>Release <output id="gate-release-value">50</output> ms<input id="gate-release" type="range" min="5" max="500" step="5" value="50"></label>
+          <button id="apply-noise-gate" type="button" class="audio-action-btn">Applicera Noise Gate</button>
+        </div>
+      </section>
+      <div id="selection-info" class="selection-info">Inget klipp markerat</div>
+    </aside>
+  </div>
+  <div class="quick-tools" id="quick-tools">
+    <div class="transport-controls">
+      <button id="toggle-play" class="play-control" aria-keyshortcuts="Space" title="Spela eller pausa (Space)">
+        <svg width="20" height="20" aria-hidden="true"><use href="#icon-play"></use></svg>
+      </button>
+    </div>
+    <div class="quick-tools-row">
+    <button class="quick-tool" id="qt-blur" title="Lägg till blur (B)">
+      <svg width="20" height="20" aria-hidden="true"><use href="#icon-blur"></use></svg>
+      <span>Blur</span>
+    </button>
+    <button class="quick-tool" id="qt-text" title="Lägg till text (T)">
+      <svg width="20" height="20" aria-hidden="true"><use href="#icon-text"></use></svg>
+      <span>Text</span>
+    </button>
+    <button class="quick-tool" id="qt-color" title="Lägg till färgblock">
+      <svg width="20" height="20" aria-hidden="true"><use href="#icon-color"></use></svg>
+      <span>Färg</span>
+    </button>
+    <button class="quick-tool" id="qt-split" title="Dela vid spelhuvud (S)">
+      <svg width="20" height="20" aria-hidden="true"><use href="#icon-split-playhead"></use></svg>
+      <span>Dela</span>
+    </button>
+    <button class="quick-tool" id="qt-remove" title="Ta bort markerat klipp (Delete)" disabled>
+      <svg width="20" height="20" aria-hidden="true"><use href="#icon-delete"></use></svg>
+      <span>Ta bort</span>
+    </button>
+    <button class="quick-tool" id="qt-crop" title="Beskär video">
+      <svg width="20" height="20" aria-hidden="true"><use href="#icon-crop"></use></svg>
+      <span>Beskär</span>
+    </button>
+    <button class="quick-tool" id="qt-transition" title="Lägg till övergång mellan klipp">
+      <span class="transition-tool-icon" aria-hidden="true">◇</span>
+      <span>Övergång</span>
+    </button>
+  </div>
+</div>
+</div>
+
+  <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+    <symbol id="icon-blur" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3.2c-2.8 3.6-5.5 6.5-5.5 10a5.5 5.5 0 0 0 11 0c0-3.5-2.7-6.4-5.5-10Z"/>
+        <circle cx="4.5" cy="18.5" r="1" opacity=".8"/>
+        <circle cx="19.5" cy="18.5" r="1" opacity=".8"/>
+        <circle cx="3.5" cy="14.5" r=".75" opacity=".55"/>
+        <circle cx="20.5" cy="14.5" r=".75" opacity=".55"/>
+      </g>
+    </symbol>
+    <symbol id="icon-text" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5 5h14"/><path d="M9 5v14"/><path d="M15 5v14"/><path d="M7 19h10"/>
+        <path d="M4 8V4h4" opacity=".75"/><path d="M20 8V4h-4" opacity=".75"/>
+      </g>
+    </symbol>
+    <symbol id="icon-split-playhead" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3v18"/><path d="m9.5 3 2.5 3 2.5-3"/>
+        <circle cx="6" cy="8" r="2.2"/><circle cx="6" cy="16" r="2.2"/>
+        <path d="m8 9.1 8.5 4.7"/><path d="m8 14.9 8.5-4.7"/>
+      </g>
+    </symbol>
+    <symbol id="icon-delete" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="m6.5 7 1 13h9l1-13"/>
+        <path d="M10 11v5"/><path d="M14 11v5"/>
+      </g>
+    </symbol>
+    <symbol id="icon-crop" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M7 3v14a2 2 0 0 0 2 2h12"/>
+        <path d="M3 7h12a2 2 0 0 1 2 2v12"/>
+        <path d="M7 7h10v10" opacity=".75"/>
+      </g>
+    </symbol>
+    <symbol id="icon-color" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="3"/>
+        <circle cx="12" cy="12" r="5" fill="currentColor" opacity=".3"/>
+      </g>
+    </symbol>
+    <symbol id="icon-play" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M8 5.14v14.72a1 1 0 0 0 1.5.86l11-7.36a1 1 0 0 0 0-1.72l-11-7.36A1 1 0 0 0 8 5.14Z"/>
+    </symbol>
+    <symbol id="icon-pause" viewBox="0 0 24 24">
+      <rect fill="currentColor" x="6" y="4" width="4" height="16" rx="1"/>
+      <rect fill="currentColor" x="14" y="4" width="4" height="16" rx="1"/>
+    </symbol>
+  </svg>
+
+  <section class="transcript-search" aria-label="Sök i tidslinjens transkribering">
+    <label for="transcript-search-input">Sök i transkribering</label>
+    <input id="transcript-search-input" type="search" autocomplete="off" placeholder="Ett eller flera sökord">
+    <button id="transcript-search-previous" type="button" aria-label="Föregående träff" disabled>‹</button>
+    <button id="transcript-search-next" type="button" aria-label="Nästa träff" disabled>›</button>
+    <output id="transcript-search-status" aria-live="polite">Ingen transkribering indexerad</output>
+    <div id="transcript-search-results" class="transcript-search-results" role="listbox" aria-label="Sökträffar" hidden></div>
+  </section>
+
+  <section class="timeline-container">
+    <div class="track-labels">
+      <div class="ruler-label"><span id="timecode">00:00.000</span></div>
+      <div class="track-label" id="visual-label">V1</div>
+      <div class="track-label" id="transcription-label"><button id="toggle-transcription" class="transcription-eye" title="Visa/dölj transkription i video" aria-label="Visa/dölj transkription i video"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button> TRANSKRIB.<input id="burn-transcription" type="checkbox" hidden></div>
+      <div class="track-label" id="audio-label">LJUD 1</div>
+    </div>
+    <div class="timeline-scroll" id="timeline-scroll">
+      <div class="timeline-tracks" id="timeline-tracks">
+        <div class="ruler" id="ruler"></div>
+        <div class="playhead" id="playhead"></div>
+        <div class="track visual-track" id="visual-track"></div>
+        <div class="track" id="transcription-track"></div>
+        <div class="track audio-track" id="audio-track"></div>
+      </div>
+    </div>
+  </section>
+
+  <div id="clip-context-menu" class="context-menu" role="menu" hidden>
+    <button id="transcribe" type="button" role="menuitem">Transkribera</button>
+  </div>
+
+  <div id="ai-editing-modal" class="modal ai-modal" role="dialog" aria-modal="true" aria-labelledby="ai-editing-title" hidden>
+    <section class="ai-chat-card">
+      <header class="ai-chat-header">
+        <div>
+          <div class="ai-chat-heading-row">
+            <h2 id="ai-editing-title">AI-redigering</h2>
+            <span id="ai-model-status" class="ai-placeholder-badge">Kontrollerar…</span>
+          </div>
+          <p>Beskriv hur du vill ändra projektet.</p>
+        </div>
+        <button id="close-ai-editing" class="ai-chat-close" type="button" aria-label="Stäng AI-redigering">×</button>
+      </header>
+
+      <div id="ai-chat-messages" class="ai-chat-messages" role="log" aria-live="polite" aria-relevant="additions">
+        <article class="ai-message ai-message-assistant">
+          <span class="ai-message-label">AI</span>
+          <p>Hej. Här kommer du senare kunna be mig klippa, flytta och förbättra materialet på tidslinjen.</p>
+        </article>
+      </div>
+
+      <form id="ai-chat-form" class="ai-chat-composer">
+        <label for="ai-chat-input">Meddelande</label>
+        <textarea id="ai-chat-input" rows="3" placeholder="Exempel: Ta bort tystnaden och lägg en rubrik i början"></textarea>
+        <div class="ai-chat-composer-footer">
+          <small id="ai-chat-connection">Använder modellen och ctx som är laddad via ditt lokala API.</small>
+          <button id="send-ai-message" type="submit" disabled>Skicka</button>
+        </div>
+      </form>
+    </section>
+  </div>
+
+  <div id="export-modal" class="modal" hidden>
+    <div class="modal-card">
+      <h2 id="export-title">Exporterar MP4</h2>
+      <progress id="export-progress" max="100" value="0"></progress>
+      <p id="export-message">Förbereder renderingen…</p>
+      <a id="download" class="download" hidden>Ladda ner MP4</a>
+      <div class="modal-actions">
+        <button id="cancel-export" type="button" hidden>Avbryt</button>
+        <button id="close-modal" type="button">Stäng</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="transition-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="transition-title" hidden>
+    <div class="modal-card transition-card">
+      <h2 id="transition-title">Övergång mellan klipp</h2>
+      <p id="transition-help">Markera det inkommande klippet eller två intilliggande bildklipp.</p>
+      <div class="transition-presets" aria-label="Övergångar">
+        <button type="button" data-transition="dissolve"><span class="transition-demo demo-dissolve"></span><strong>Dissolve</strong></button>
+        <button type="button" data-transition="slide-left"><span class="transition-demo demo-left"></span><strong>Slide vänster</strong></button>
+        <button type="button" data-transition="slide-right"><span class="transition-demo demo-right"></span><strong>Slide höger</strong></button>
+        <button type="button" data-transition="slide-up"><span class="transition-demo demo-up"></span><strong>Slide upp</strong></button>
+        <button type="button" data-transition="slide-down"><span class="transition-demo demo-down"></span><strong>Slide ned</strong></button>
+      </div>
+      <label class="transition-duration">Längd <output id="transition-duration-value">0.6 s</output>
+        <input id="transition-duration" type="range" min="0.2" max="2" step="0.1" value="0.6">
+      </label>
+      <div class="modal-actions">
+        <button id="remove-transition" type="button">Ta bort övergång</button>
+        <button id="close-transition" type="button">Stäng</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="transcribe-modal" class="modal" hidden>
+    <div class="modal-card">
+      <h2>Transkriberar ljud</h2>
+      <progress id="transcribe-progress" max="100" value="0"></progress>
+      <p id="transcribe-message">Förbereder transkriberingen…</p>
+      <div class="modal-actions">
+        <button id="cancel-transcribe" type="button" hidden>Avbryt</button>
+        <button id="close-transcribe-modal" type="button">Stäng</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/timeline-model.js?v=0.14.0" defer></script>
+  <script src="/app.js?v=0.14.0" defer></script>
+</body>
+</html>

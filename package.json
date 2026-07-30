@@ -1,0 +1,22 @@
+{
+  "name": "nvidia-video-editor",
+  "version": "0.13.0",
+  "private": true,
+  "description": "Lokal webbaserad videoredigerare med FFmpeg- och NVENC-export",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && node --check audio-tools.js && node --check local-ai.js && node --check timeline-model.js && node --check app.js",
+    "test": "node tests/run-tests.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "multer": "^2.2.0"
+  },
+  "devDependencies": {
+    "jsdom": "^22.1.0"
+  }
+}

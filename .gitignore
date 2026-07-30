@@ -1,0 +1,12 @@
+node_modules/
+uploads/
+exports/
+library.json
+npm-debug.log*
+.runtime/
+.server.log
+.server.pid
+whisper-venv/
+models/
+nvidia-upscaler-custom/
+audio-analyses.json
