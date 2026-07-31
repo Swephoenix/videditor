@@ -107,6 +107,7 @@ async function waitForJob(job, timeoutMilliseconds = 20000) {
   });
   const project = {
     format: 'mp4',
+    quality: 2,
     hardware: 'cpu',
     upscale: false,
     canvas: { width: 320, height: 180 },

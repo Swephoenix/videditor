@@ -1112,7 +1112,7 @@ function validateProject(body) {
   if (duration > MAX_DURATION) throw badRequest('Projektet är längre än fyra timmar.');
   const hardware = ['auto', 'nvidia', 'cpu'].includes(body.hardware) ? body.hardware : 'auto';
   const upscale = format === 'mp4' && body.upscale === true;
-  const quality = format === 'mp4' ? Math.round(clamp(Number(body.quality) || 3, 1, 5)) : null;
+  const quality = format === 'mp4' ? Math.round(clamp(Number(body.quality) || 5, 1, 5)) : null;
   if (format !== 'mp4' && !clips.some((clip) => clip.media?.hasAudio && !clip.muted)) {
     throw badRequest('Tidslinjen saknar hörbart ljud att exportera.');
   }
@@ -1472,7 +1472,7 @@ function runUpscale(job, inputPath, outputPath) {
     throw new Error('video-upscale hittades inte. Bygg nvidia-upscaler-custom (cmake --build build) eller lägg binären i nvidia-upscaler-custom/.');
   }
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, [inputPath, outputPath], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(bin, [inputPath, outputPath, '--codec', 'h264'], { stdio: ['ignore', 'pipe', 'pipe'] });
     job.encodePid = child.pid;
     let stderr = '';
     child.stdout.on('data', () => {});
@@ -1899,20 +1899,31 @@ async function renderProject(jobId, project) {
 
   const CRF_MAP = [null, 28, 24, 20, 15, 0];
   const CQ_MAP = [null, 34, 27, 20, 13, 1];
-  const q = project.quality != null ? project.quality : 3;
+  const q = project.quality != null ? project.quality : 5;
   const crf = CRF_MAP[q] ?? 20;
   const cq = CQ_MAP[q] ?? 20;
-  const qualityLabel = ['', 'låg', '', 'standard', '', 'lossless'][q] || `nivå ${q}`;
+  const lossless = crf === 0;
+  const qualityLabel = lossless ? 'lossless' : (['', 'låg', '', 'standard', '', ''][q] || `nivå ${q}`);
 
   args.push('-filter_complex', filters.join(';'), '-map', '[vout]', '-map', '[aout]');
-  if (useNvenc) args.push('-c:v', 'h264_nvenc', '-preset', 'p5', '-cq', String(cq), '-profile:v', 'high');
-  else args.push('-c:v', 'libx264', '-preset', 'medium', '-crf', String(crf), '-profile:v', 'high', '-level', '41');
+  if (useNvenc) {
+    args.push('-c:v', 'h264_nvenc', '-preset', 'p5', '-cq', String(cq), '-profile:v', 'high');
+  } else {
+    args.push('-c:v', 'libx264', '-preset', 'medium');
+    if (lossless) {
+      args.push('-x264-params', 'lossless=1');
+    } else {
+      args.push('-crf', String(crf));
+    }
+    args.push('-profile:v', 'high', '-level', '41');
+  }
   args.push(
     '-c:a', 'aac', '-b:a', '192k', '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
     '-t', project.duration.toFixed(3), '-progress', 'pipe:1', '-nostats', outputPath
   );
   const hwLabel = useNvenc ? 'NVIDIA NVENC' : 'CPU (libx264)';
-  job.encoder = `${hwLabel} · ${qualityLabel} (CRF ${crf})`;
+  const encoderLabel = lossless ? `${hwLabel} · lossless` : `${hwLabel} · ${qualityLabel} (CRF ${crf})`;
+  job.encoder = encoderLabel;
   job.phase = 'encode';
   job.phaseStartedAt = new Date().toISOString();
   const child = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });

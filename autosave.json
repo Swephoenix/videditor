@@ -48,7 +48,7 @@
       "mediaDuration": 14400,
       "start": 5.04682,
       "trimStart": 0,
-      "trimEnd": 3.3,
+      "trimEnd": 2.57012429780536,
       "color": {
         "color": "#ffffff",
         "x": 0.5,
@@ -117,32 +117,28 @@
       }
     },
     {
-      "id": "98b2f78a-55aa-4bdf-a3ca-a566a3a07ac4",
-      "mediaId": "384b696e-f67f-46d0-9b85-775b8526a8fb",
+      "id": "c1e89167-b12a-4611-8e59-16a6d6c9e284",
+      "mediaId": "8bd4f085-faef-488f-b852-978354c35b77",
       "name": "ambition-sverige-partibeteckning-transparent.svg",
       "kind": "image",
       "mediaDuration": 14400,
       "sourceWidth": 1200,
       "sourceHeight": 461,
-      "start": 6.40075154500751,
-      "trimStart": 0,
-      "trimEnd": 1.7499999999999998,
+      "start": 6.470858715137906,
+      "trimStart": 0.04708875498029935,
+      "trimEnd": 1.184619344288154,
       "crop": {
         "left": 0,
         "right": 0,
         "top": 0,
         "bottom": 0
       },
-      "visualScale": 0.7282925587899067,
-      "trackIndex": 3,
-      "animIn": {
-        "type": "fade",
-        "duration": 0.5
-      }
+      "visualScale": 1,
+      "trackIndex": 2
     }
   ],
   "selectedId": null,
-  "playhead": 7.9,
+  "playhead": 1.15,
   "canvas": {
     "width": 1280,
     "height": 720
