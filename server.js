@@ -521,6 +521,28 @@ app.post('/api/media', upload.single('media'), async (request, response, next) =
   }
 });
 
+app.post('/api/media/html', async (request, response, next) => {
+  try {
+    const body = request.body || {};
+    const code = typeof body.code === 'string' ? body.code.trim() : '';
+    if (!code) throw badRequest('Ingen HTML-kod angiven.');
+    if (code.length > MAX_HTML_CODE) throw badRequest('HTML-koden är för lång.');
+    const width = Math.max(2, Math.min(4096, Math.round(Number(body.width) || 1280)));
+    const height = Math.max(2, Math.min(4096, Math.round(Number(body.height) || 720)));
+    const duration = Math.max(0.1, Math.min(300, Number(body.duration) || 5));
+    const fps = Math.max(1, Math.min(60, Math.round(Number(body.fps) || 30)));
+    const background = /^#[0-9a-f]{6}$/i.test(String(body.background || '')) ? body.background : '#000000';
+    const name = (typeof body.name === 'string' && body.name.trim())
+      ? `${path.basename(body.name.trim()).replace(/\.mp4$/i, '')}.mp4`.slice(0, 200)
+      : 'HTML-animation.mp4';
+    const item = await renderHtmlClipToMedia({ code, width, height, duration, fps, background, name });
+    response.status(201).json(item);
+  } catch (error) {
+    if (!error.status) error.status = 400;
+    next(error);
+  }
+});
+
 app.get('/api/media/:id/file', (request, response) => {
   const item = mediaLibrary.get(request.params.id);
   if (!item) return response.status(404).json({ error: 'Mediefilen finns inte.' });
@@ -1726,6 +1748,41 @@ async function renderHtmlBlockFrames(html, blockWidth, blockHeight, duration, fp
   return totalFrames;
 }
 
+async function renderHtmlClipToMedia({ code, width, height, duration, fps, background, name }) {
+  const framesDir = path.join(EXPORT_DIR, `htmlclip-${crypto.randomUUID()}`);
+  const outputName = `${crypto.randomUUID()}.mp4`;
+  const outputPath = path.join(UPLOAD_DIR, outputName);
+  try {
+    await renderHtmlBlockFrames({ code }, width, height, duration, fps, framesDir);
+    const args = [
+      '-hide_banner', '-y', '-framerate', String(fps), '-start_number', '1',
+      '-i', path.join(framesDir, 'frame-%04d.png'),
+      '-filter_complex',
+      `color=c=${background.replace('#', '0x')}:s=${width}x${height}:r=${fps}[bg];` +
+      `[bg][0:v]overlay=0:0:shortest=1,format=yuv420p[v]`,
+      '-map', '[v]',
+      '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-profile:v', 'high', '-level', '41',
+      '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-t', duration.toFixed(3),
+      '-progress', 'pipe:1', '-nostats', outputPath
+    ];
+    await runProcess('ffmpeg', args);
+    const metadata = await probeMedia(outputPath, '.mp4');
+    const item = {
+      id: crypto.randomUUID(),
+      name,
+      storedName: outputName,
+      size: (await fsp.stat(outputPath)).size,
+      createdAt: new Date().toISOString(),
+      ...metadata
+    };
+    mediaLibrary.set(item.id, item);
+    await saveLibrary();
+    return item;
+  } finally {
+    await fsp.rm(framesDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 async function renderProject(jobId, project) {
   if (project.format !== 'mp4') {
     await renderAudioProject(jobId, project);
@@ -2154,5 +2211,6 @@ module.exports = {
   buildAssSubtitle,
   renderProject,
   renderHtmlBlockFrames,
+  renderHtmlClipToMedia,
   jobs
 };

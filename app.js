@@ -70,6 +70,10 @@ const elements = {
   htmlTools: document.querySelector('#html-tools'),
   htmlCode: document.querySelector('#html-code'),
   htmlInputs: [...document.querySelectorAll('.html-input')],
+  htmlRenderInputs: [...document.querySelectorAll('.html-render-input')],
+  htmlRenderBg: document.querySelector('.html-render-bg'),
+  htmlRenderClip: document.querySelector('#html-render-clip'),
+  htmlRenderStatus: document.querySelector('#html-render-status'),
   placeholder: document.querySelector('#preview-placeholder'),
   status: document.querySelector('#status'),
   info: document.querySelector('#selection-info'),
@@ -200,6 +204,9 @@ elements.textTools.addEventListener('input', handleTextInput);
 elements.textTools.addEventListener('change', handleTextInput);
 elements.htmlTools.addEventListener('input', handleHtmlInput);
 elements.htmlTools.addEventListener('change', handleHtmlInput);
+elements.htmlTools.addEventListener('input', handleHtmlRenderInput);
+elements.htmlTools.addEventListener('change', handleHtmlRenderInput);
+elements.htmlRenderClip.addEventListener('click', renderHtmlClipToVideo);
 elements.textTools.addEventListener('click', (e) => {
   if (e.target.dataset.action === 'center') centerSelectedText();
 });
@@ -2382,8 +2389,25 @@ function updateHtmlTools(clip) {
       const output = document.querySelector(`.val-html-${property}`);
       if (output) output.textContent = String(Math.round((val ?? 0.5) * 100));
     });
+    syncHtmlRenderDefaults();
   }
   requestAnimationFrame(updatePreviewWindowSize);
+}
+
+const htmlRenderTouched = new Set();
+
+function syncHtmlRenderDefaults() {
+  if (!state.canvas?.width || !state.canvas?.height) return;
+  const setIfUntouched = (property, value) => {
+    if (htmlRenderTouched.has(property)) return;
+    const input = elements.htmlRenderInputs.find((item) => item.dataset.renderProperty === property);
+    if (!input) return;
+    input.value = String(value);
+    const output = document.querySelector(`.val-html-render-${property}`);
+    if (output) output.textContent = String(Math.round(value));
+  };
+  setIfUntouched('width', state.canvas.width);
+  setIfUntouched('height', state.canvas.height);
 }
 
 function handleHtmlInput(event) {
@@ -2404,6 +2428,55 @@ function handleHtmlInput(event) {
   updateHtmlTools(clip);
   renderHtmlOverlays(state.playhead);
   selectClip(clip.id);
+}
+
+function handleHtmlRenderInput(event) {
+  const target = event.target;
+  if (target.dataset.renderProperty) {
+    const property = target.dataset.renderProperty;
+    htmlRenderTouched.add(property);
+    const output = document.querySelector(`.val-html-render-${property}`);
+    if (output) output.textContent = String(Math.round(Number(target.value)));
+  }
+}
+
+async function renderHtmlClipToVideo() {
+  const clip = state.clips.find((item) => item.id === state.selectedId && item.kind === 'html');
+  if (!clip) return;
+  const code = elements.htmlCode.value.trim();
+  if (!code) {
+    elements.htmlRenderStatus.textContent = 'Klistra in HTML-kod först.';
+    elements.htmlRenderStatus.className = 'html-render-status error';
+    return;
+  }
+  const get = (property, fallback) => {
+    const input = elements.htmlRenderInputs.find((item) => item.dataset.renderProperty === property);
+    return input ? Number(input.value) : fallback;
+  };
+  const duration = Math.max(0.5, get('duration', 5));
+  const width = Math.max(320, Math.round(get('width', 1280)));
+  const height = Math.max(240, Math.round(get('height', 720)));
+  const background = elements.htmlRenderBg.value || '#000000';
+  const button = elements.htmlRenderClip;
+  const status = elements.htmlRenderStatus;
+  button.disabled = true;
+  status.textContent = 'Rendera HTML till videoklipp…';
+  status.className = 'html-render-status';
+  try {
+    const media = await api('/api/media/html', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, duration, width, height, background })
+    });
+    status.textContent = `Klippet "${media.name}" (${media.width}×${media.height}, ${media.duration.toFixed(1)} s) lades till i mediabiblioteket.`;
+    status.className = 'html-render-status ok';
+    addMediaClip(media);
+  } catch (error) {
+    status.textContent = `Rendering misslyckades: ${error.message}`;
+    status.className = 'html-render-status error';
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function applyTextPreset(presetId) {
