@@ -293,6 +293,55 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   background: #2b2121;
 }
 .color-tools[hidden] { display: none; }
+.html-tools {
+  width: 100%;
+  padding: 10px 14px 12px;
+  border: 1px solid #3a6ea5;
+  border-radius: 8px;
+  background: #1d232b;
+}
+.html-tools[hidden] { display: none; }
+.html-grid {
+  display: grid;
+  gap: 10px;
+  margin-top: 8px;
+}
+.html-grid label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.html-grid label.html-full {
+  display: block;
+}
+.html-grid textarea {
+  width: 100%;
+  margin-top: 4px;
+  padding: 8px;
+  box-sizing: border-box;
+  font-family: ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #d8e2f0;
+  background: #12161d;
+  border: 1px solid #3a4a5e;
+  border-radius: 5px;
+  resize: vertical;
+}
+.html-grid input[type="range"] { flex: 1; }
+.html-grid output {
+  min-width: 2.5em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.html-hint {
+  font-size: 11px;
+  color: #8aa4bd;
+  margin: 2px 0 0;
+  line-height: 1.4;
+}
 .quality-range-label { font-size: 11px; color: #777; display: block; margin-top: 2px; }
 .anim-tools {
   width: 100%;
@@ -1111,6 +1160,15 @@ body.timeline-selecting * { cursor: crosshair !important; user-select: none !imp
 .text-layer { position: absolute; inset: 0; z-index: 4; overflow: hidden; pointer-events: none; }
 .text-handle-layer { position: absolute; inset: 0; z-index: 5; overflow: hidden; pointer-events: none; }
 .color-layer { position: absolute; inset: 0; z-index: 2; overflow: hidden; pointer-events: none; }
+.html-layer { position: absolute; inset: 0; z-index: 5; overflow: hidden; pointer-events: none; }
+.html-block {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  border: 0;
+  background: transparent;
+  pointer-events: none;
+}
+.html-block.selected { outline: 2px dashed #8fc7ff; outline-offset: 2px; }
 .color-block {
   position: absolute;
   transform: translate(-50%, -50%);

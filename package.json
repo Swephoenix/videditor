@@ -14,9 +14,13 @@
   },
   "dependencies": {
     "express": "^4.21.2",
-    "multer": "^2.2.0"
+    "multer": "^2.2.0",
+    "puppeteer": "^25.4.0"
   },
   "devDependencies": {
     "jsdom": "^22.1.0"
+  },
+  "allowScripts": {
+    "puppeteer@25.4.0": true
   }
 }

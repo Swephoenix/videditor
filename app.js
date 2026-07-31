@@ -66,6 +66,10 @@ const elements = {
   canvasWidth: document.querySelector('#canvas-width'),
   canvasHeight: document.querySelector('#canvas-height'),
   blurLayer: document.querySelector('#blur-layer'),
+  htmlLayer: document.querySelector('#html-layer'),
+  htmlTools: document.querySelector('#html-tools'),
+  htmlCode: document.querySelector('#html-code'),
+  htmlInputs: [...document.querySelectorAll('.html-input')],
   placeholder: document.querySelector('#preview-placeholder'),
   status: document.querySelector('#status'),
   info: document.querySelector('#selection-info'),
@@ -172,6 +176,7 @@ document.querySelector('#separate-audio').addEventListener('click', separateAudi
 document.querySelector('#add-blur').addEventListener('click', addBlurClip);
 document.querySelector('#add-text').addEventListener('click', addTextClip);
 document.querySelector('#add-color').addEventListener('click', addColorClip);
+document.querySelector('#add-html').addEventListener('click', addHtmlClip);
 document.querySelector('#qt-color').addEventListener('click', addColorClip);
 document.querySelector('#add-transition').addEventListener('click', openTransitionPicker);
 document.querySelector('#qt-transition').addEventListener('click', openTransitionPicker);
@@ -193,6 +198,8 @@ elements.blurInputs.forEach((input) => input.addEventListener('pointerdown', beg
 elements.textPresetButtons.forEach((button) => button.addEventListener('click', () => applyTextPreset(button.dataset.textPreset)));
 elements.textTools.addEventListener('input', handleTextInput);
 elements.textTools.addEventListener('change', handleTextInput);
+elements.htmlTools.addEventListener('input', handleHtmlInput);
+elements.htmlTools.addEventListener('change', handleHtmlInput);
 elements.textTools.addEventListener('click', (e) => {
   if (e.target.dataset.action === 'center') centerSelectedText();
 });
@@ -265,6 +272,7 @@ document.querySelector('#split').addEventListener('click', splitSelectedClip);
 elements.remove.addEventListener('click', removeSelectedClip);
 document.querySelector('#qt-blur').addEventListener('click', addBlurClip);
 document.querySelector('#qt-text').addEventListener('click', addTextClip);
+document.querySelector('#qt-html').addEventListener('click', addHtmlClip);
 document.querySelector('#qt-split').addEventListener('click', splitSelectedClip);
 document.querySelector('#qt-remove').addEventListener('click', removeSelectedClip);
 document.querySelector('#qt-crop').addEventListener('click', toggleCropMode);
@@ -1584,7 +1592,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') persist();
 });
 
-const VISUAL_KINDS = ['video', 'image', 'text', 'blur', 'color'];
+const VISUAL_KINDS = ['video', 'image', 'text', 'blur', 'color', 'html'];
 
 function trackKinds(kind) {
   if (kind === 'audio') return ['audio'];
@@ -1801,6 +1809,7 @@ function describeClip(clip) {
   if (!clip) return 'Inget klipp markerat';
   if (clip.kind === 'blur') return `${clip.name} · start ${formatTime(clip.start)} · visas i ${clipDuration(clip).toFixed(2)} s`;
   if (clip.kind === 'color') return `${clip.name} · start ${formatTime(clip.start)} · visas i ${clipDuration(clip).toFixed(2)} s · "${clip.color.color}"`;
+  if (clip.kind === 'html') return `${clip.name} · start ${formatTime(clip.start)} · visas i ${clipDuration(clip).toFixed(2)} s`;
   if (clip.kind === 'text') return `${clip.name} · start ${formatTime(clip.start)} · visas i ${clipDuration(clip).toFixed(2)} s · "${clip.text.text}"`;
   if (clip.kind === 'image') return `${clip.name} · start ${formatTime(clip.start)} · visas i ${clipDuration(clip).toFixed(2)} s`;
   return `${clip.name} · start ${formatTime(clip.start)} · källa ${formatTime(clip.trimStart)}–${formatTime(clip.trimEnd)}`;
@@ -1821,7 +1830,7 @@ function selectClips(ids, primaryId = null, options = {}) {
   if (qtRemove) qtRemove.disabled = !hasSelection;
   const clip = state.clips.find((item) => item.id === nextPrimaryId);
   if (!options.preventPlayheadJump && !editorHistory.restoring && selectionChanged &&
-      (clip?.kind === 'blur' || clip?.kind === 'color') &&
+      (clip?.kind === 'blur' || clip?.kind === 'color' || clip?.kind === 'html') &&
       (state.playhead < clip.start || state.playhead >= clip.start + clipDuration(clip))) {
     state.playhead = clip.start;
   }
@@ -1839,8 +1848,9 @@ function selectClips(ids, primaryId = null, options = {}) {
   updateColorTools(clip);
   updateAnimTools(clip);
   updateTextTools(clip);
+  updateHtmlTools(clip);
   updateAudioTools(clip);
-  const anyTools = clip && (clip.kind === 'video' || clip.kind === 'image' || clip.kind === 'blur' || clip.kind === 'color' || clip.kind === 'text' || clip.kind === 'audio');
+  const anyTools = clip && (clip.kind === 'video' || clip.kind === 'image' || clip.kind === 'blur' || clip.kind === 'color' || clip.kind === 'text' || clip.kind === 'html' || clip.kind === 'audio');
   elements.toolsPanel.hidden = !anyTools;
   if (options.refreshPreview !== false) setPlayhead(state.playhead);
 }
@@ -2106,6 +2116,34 @@ function addColorClip() {
   setPlayhead(clip.start);
 }
 
+function defaultHtmlBlock() {
+  return {
+    code: `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif">
+  <div style="text-align:center;background:rgba(0,0,0,0.6);color:white;padding:20px 28px;border-radius:12px;animation:pulse 2s infinite">
+    <div style="font-size:42px;font-weight:700">Hej!</div>
+    <div style="font-size:18px;opacity:0.8">HTML-block</div>
+  </div>
+  <style>
+    @keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.06); } }
+  </style>
+</div>`,
+    x: 0.5, y: 0.5, width: 0.5, height: 0.5
+  };
+}
+
+function addHtmlClip() {
+  recordHistory();
+  const clip = {
+    id: crypto.randomUUID(), name: 'HTML-block', kind: 'html',
+    mediaDuration: MAX_IMAGE_SECONDS, start: state.playhead, trimStart: 0, trimEnd: 4,
+    html: defaultHtmlBlock()
+  };
+  state.clips.push(clip);
+  createClipElement(clip);
+  selectClip(clip.id);
+  setPlayhead(clip.start);
+}
+
 function updateColorTools(clip) {
   const canColor = clip?.kind === 'color';
   elements.colorTools.hidden = !canColor;
@@ -2209,6 +2247,17 @@ function showTextSections(presetId) {
 
 function defaultText() {
   return { text: 'Skriv din text här', presetId: null, fontSize: 0.08, color: '#FFFFFF', background: 'none', x: 0.5, y: 0.5, scaleX: 1, animIn: null, animOut: null };
+}
+
+function normalizeHtml(rawHtml) {
+  const base = (rawHtml && typeof rawHtml === 'object') ? { ...rawHtml } : defaultHtmlBlock();
+  return {
+    code: typeof base.code === 'string' ? base.code : defaultHtmlBlock().code,
+    x: clamp(Number(base.x ?? 0.5), 0, 1),
+    y: clamp(Number(base.y ?? 0.5), 0, 1),
+    width: clamp(Number(base.width ?? 0.5), 0.05, 1),
+    height: clamp(Number(base.height ?? 0.5), 0.05, 1)
+  };
 }
 
 function normalizeText(rawText) {
@@ -2315,6 +2364,45 @@ function handleTextInput(event) {
   }
   updateTextTools(clip);
   renderTextOverlays(state.playhead);
+  selectClip(clip.id);
+}
+
+function updateHtmlTools(clip) {
+  const canHtml = clip?.kind === 'html';
+  elements.htmlTools.hidden = !canHtml;
+  if (canHtml) {
+    clip.html = normalizeHtml(clip.html);
+    const html = clip.html;
+    elements.htmlCode.value = html.code;
+    elements.htmlInputs.forEach((input) => {
+      const property = input.dataset.property;
+      if (property === 'code') return;
+      const val = html[property];
+      input.value = String(val ?? 0.5);
+      const output = document.querySelector(`.val-html-${property}`);
+      if (output) output.textContent = String(Math.round((val ?? 0.5) * 100));
+    });
+  }
+  requestAnimationFrame(updatePreviewWindowSize);
+}
+
+function handleHtmlInput(event) {
+  const target = event.target;
+  if (!target.dataset.property) return;
+  const clip = state.clips.find((item) => item.id === state.selectedId);
+  if (!clip || clip.kind !== 'html') return;
+  recordInputEdit();
+  const property = target.dataset.property;
+  const value = target.value;
+  if (property === 'code') {
+    clip.html.code = value;
+  } else if (property === 'x' || property === 'y') {
+    clip.html[property] = clamp(Number(value), 0, 1);
+  } else {
+    clip.html[property] = clamp(Number(value), 0.05, 1);
+  }
+  updateHtmlTools(clip);
+  renderHtmlOverlays(state.playhead);
   selectClip(clip.id);
 }
 
@@ -3081,6 +3169,46 @@ function renderTextOverlays(time) {
   }
 }
 
+function getHtmlLayer() {
+  let layer = elements.previewWindow.querySelector('.html-layer');
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.className = 'html-layer';
+    elements.previewWindow.appendChild(layer);
+  }
+  return layer;
+}
+
+function renderHtmlOverlays(time) {
+  const layer = getHtmlLayer();
+  const active = state.clips.filter((clip) =>
+    clip.kind === 'html' && time >= clip.start && time < clip.start + clipDuration(clip)
+  ).sort((a, b) => (a.trackIndex || 0) - (b.trackIndex || 0));
+  const frames = active.map((clip) => {
+    clip.html = normalizeHtml(clip.html);
+    const html = clip.html;
+    const frame = document.createElement('iframe');
+    frame.className = 'html-block';
+    frame.dataset.id = clip.id;
+    if (clip.id === state.selectedId) frame.classList.add('selected');
+    frame.style.left = `${html.x * 100}%`;
+    frame.style.top = `${html.y * 100}%`;
+    frame.style.width = `${html.width * 100}%`;
+    frame.style.height = `${html.height * 100}%`;
+    frame.srcdoc = wrapHtmlPreview(html.code);
+    frame.setAttribute('scrolling', 'no');
+    return frame;
+  });
+  layer.replaceChildren(...frames);
+}
+
+function wrapHtmlPreview(code) {
+  if (/<html[\s>]/i.test(code) || /<!doctype/i.test(code)) return code;
+  return `<!doctype html><html><head><meta charset="utf-8"><style>` +
+    `html,body{margin:0;padding:0;width:100%;height:100%;box-sizing:border-box;overflow:hidden;background:transparent}` +
+    `</style></head><body>${code}</body></html>`;
+}
+
 function buildWordTimeline(segments) {
   const words = [];
   for (const segment of segments || []) {
@@ -3468,7 +3596,7 @@ function maxTrackFor(time, kinds) {
   return max;
 }
 
-const OVERLAY_BASE = { 'color-layer': 2, 'blur-layer': 3, 'text-layer': 4 };
+const OVERLAY_BASE = { 'color-layer': 2, 'blur-layer': 3, 'text-layer': 4, 'html-layer': 5 };
 function setOverlayZ(className, maxTrack) {
   const el = className === 'blur-layer' ? elements.blurLayer : elements.previewWindow.querySelector('.' + className);
   if (el) el.style.zIndex = String(OVERLAY_BASE[className] + maxTrack * 10);
@@ -3495,12 +3623,15 @@ function syncPlaybackMedia(time) {
   const maxColor = maxTrackFor(time, ['color']);
   const maxBlur = maxTrackFor(time, ['blur']);
   const maxText = maxTrackFor(time, ['text']);
+  const maxHtml = maxTrackFor(time, ['html']);
   setOverlayZ('color-layer', maxColor);
   setOverlayZ('blur-layer', maxBlur);
   setOverlayZ('text-layer', maxText);
+  setOverlayZ('html-layer', maxHtml);
   renderBlurOverlays(time);
   renderColorOverlays(time);
   renderTextOverlays(time);
+  renderHtmlOverlays(time);
 
   const activeAudio = state.clips.filter((clip) =>
     clip.kind === 'audio' && time >= clip.start && time < clip.start + clipDuration(clip)
@@ -3548,9 +3679,11 @@ function setPlayhead(seconds, updatePreview = true) {
   setOverlayZ('color-layer', maxTrackFor(p, ['color']));
   setOverlayZ('blur-layer', maxTrackFor(p, ['blur']));
   setOverlayZ('text-layer', maxTrackFor(p, ['text']));
+  setOverlayZ('html-layer', maxTrackFor(p, ['html']));
   renderBlurOverlays(state.playhead);
   renderColorOverlays(state.playhead);
   renderTextOverlays(state.playhead);
+  renderHtmlOverlays(state.playhead);
   renderTranscriptOverlay(state.playhead);
   if (!updatePreview) return;
   persist();
@@ -4053,8 +4186,8 @@ async function exportProject(format) {
         quality: normalizedFormat === 'mp4' ? Number(elements.exportQuality.value) : null,
         hardware: normalizedFormat === 'mp4' && elements.useNvidia.checked ? 'nvidia' : 'cpu',
         upscale: normalizedFormat === 'mp4' && elements.useUpscale.checked,
-        clips: state.clips.map(({ mediaId, kind, start, trimStart, trimEnd, crop, blur, color, text, muted, trackIndex, transitionIn, visualScale, animIn }) => ({
-          mediaId, kind, start, trimStart, trimEnd, crop, blur, color, text, muted, trackIndex, transitionIn, visualScale, animIn
+        clips: state.clips.map(({ mediaId, kind, start, trimStart, trimEnd, crop, blur, color, html, text, muted, trackIndex, transitionIn, visualScale, animIn }) => ({
+          mediaId, kind, start, trimStart, trimEnd, crop, blur, color, html, text, muted, trackIndex, transitionIn, visualScale, animIn
         }))
       })
     });

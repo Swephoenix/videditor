@@ -3,7 +3,7 @@
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) root.TimelineModel = api;
 })(typeof window !== 'undefined' ? window : globalThis, function createTimelineModel() {
-  const VISUAL = new Set(['video', 'image', 'text', 'blur', 'color']);
+  const VISUAL = new Set(['video', 'image', 'text', 'blur', 'color', 'html']);
 
   function clipEnd(clip) {
     const start = Number(clip?.start) || 0;

@@ -1068,7 +1068,7 @@ function validateProject(body) {
   if (body.clips.length > MAX_CLIPS) throw badRequest(`Max ${MAX_CLIPS} klipp kan exporteras.`);
   const format = ['mp4', 'mp3', 'wav'].includes(body.format) ? body.format : 'mp4';
   const clips = body.clips.map((clip) => {
-    const kind = ['video', 'audio', 'image', 'blur', 'text', 'color'].includes(clip.kind) ? clip.kind : 'video';
+    const kind = ['video', 'audio', 'image', 'blur', 'text', 'color', 'html'].includes(clip.kind) ? clip.kind : 'video';
     const start = finiteNumber(clip.start, 'Starttid');
     const trackIndex = Math.floor(finiteNumber(clip.trackIndex ?? 0, 'Spårnummer', 0, MAX_CLIPS));
     if (kind === 'blur') {
@@ -1088,6 +1088,12 @@ function validateProject(body) {
       const trimEnd = finiteNumber(clip.trimEnd, 'Trimslut');
       if (trimEnd - trimStart < 0.05) throw badRequest('Ett färgblock är för kort.');
       return { media: null, kind, start, trimStart, trimEnd, color: validateColorBlock(clip.color), trackIndex };
+    }
+    if (kind === 'html') {
+      const trimStart = finiteNumber(clip.trimStart, 'Trimstart');
+      const trimEnd = finiteNumber(clip.trimEnd, 'Trimslut');
+      if (trimEnd - trimStart < 0.05) throw badRequest('Ett HTML-block är för kort.');
+      return { media: null, kind, start, trimStart, trimEnd, html: validateHtml(clip.html), trackIndex };
     }
     const media = mediaLibrary.get(String(clip.mediaId || ''));
     if (!media) throw badRequest('Ett klipp hänvisar till en saknad mediefil.');
@@ -1226,6 +1232,20 @@ function validateColorBlock(raw) {
     throw badRequest('Färgblocket måste ligga helt innanför bilden.');
   }
   return { color, x, y, width, height };
+}
+
+function validateHtml(raw) {
+  const code = typeof raw?.code === 'string' ? raw.code.trim() : '';
+  if (!code) throw badRequest('HTML-blocket saknar kod.');
+  if (code.length > 200000) throw badRequest('HTML-koden är för lång (max 200 000 tecken).');
+  const x = clamp(Number(raw?.x ?? 0.5), 0, 1);
+  const y = clamp(Number(raw?.y ?? 0.5), 0, 1);
+  const width = clamp(Number(raw?.width ?? 0.5), 0.05, 1);
+  const height = clamp(Number(raw?.height ?? 0.5), 0.05, 1);
+  if (x + width / 2 > 1 || x - width / 2 < 0 || y + height / 2 > 1 || y - height / 2 < 0) {
+    throw badRequest('HTML-blocket måste ligga helt innanför bilden.');
+  }
+  return { code, x, y, width, height };
 }
 
 function normalizeHex(value) {
@@ -1660,6 +1680,52 @@ async function convertSvgToPng(svgPath, outputDir) {
   return pngPath;
 }
 
+const MAX_HTML_CODE = 200000;
+
+function loadPuppeteer() {
+  try {
+    return require('puppeteer');
+  } catch (_error) {
+    throw new Error('puppeteer saknas. Installera det med: npm install puppeteer');
+  }
+}
+
+function wrapHtmlDocument(code) {
+  if (/<html[\s>]/i.test(code) || /<!doctype/i.test(code)) return code;
+  return `<!doctype html><html><head><meta charset="utf-8"><style>` +
+    `html,body{margin:0;padding:0;width:100%;height:100%;box-sizing:border-box;overflow:hidden;background:transparent}` +
+    `</style></head><body>${code}</body></html>`;
+}
+
+async function renderHtmlBlockFrames(html, blockWidth, blockHeight, duration, fps, outputDir) {
+  const puppeteer = loadPuppeteer();
+  const totalFrames = Math.max(1, Math.round(duration * fps));
+  await fsp.mkdir(outputDir, { recursive: true });
+  const browser = await puppeteer.launch({
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu']
+  });
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: blockWidth, height: blockHeight, deviceScaleFactor: 1 });
+    await page.setContent(wrapHtmlDocument(html.code), { waitUntil: 'networkidle0' });
+    await page.evaluate(() => document.fonts && document.fonts.ready).catch(() => {});
+    const startTime = Date.now();
+    for (let frame = 1; frame <= totalFrames; frame += 1) {
+      const target = startTime + (frame / fps) * 1000;
+      const wait = target - Date.now();
+      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+      await page.screenshot({
+        path: path.join(outputDir, `frame-${String(frame).padStart(4, '0')}.png`),
+        type: 'png',
+        omitBackground: true
+      });
+    }
+  } finally {
+    await browser.close();
+  }
+  return totalFrames;
+}
+
 async function renderProject(jobId, project) {
   if (project.format !== 'mp4') {
     await renderAudioProject(jobId, project);
@@ -1684,15 +1750,42 @@ async function renderProject(jobId, project) {
     clip._svgPngPath = pngPath;
     tempPngs.push(pngPath);
   }));
+  const { width, height } = project.canvas;
+  const htmlClips = project.clips.filter((clip) => clip.kind === 'html');
+  let htmlIndex = 0;
+  for (const clip of htmlClips) {
+    const html = clip.html;
+    const blockWidth = Math.max(2, Math.round(html.width * width));
+    const blockHeight = Math.max(2, Math.round(html.height * height));
+    const length = clip.trimEnd - clip.trimStart;
+    const framesDir = path.join(EXPORT_DIR, `html-${jobId}-${htmlIndex}`);
+    tempPngs.push(framesDir);
+    job.phase = 'html-render';
+    job.phaseStartedAt = new Date().toISOString();
+    await renderHtmlBlockFrames(html, blockWidth, blockHeight, length, 30, framesDir);
+    clip._htmlFramesDir = framesDir;
+    clip._htmlBlockWidth = blockWidth;
+    clip._htmlBlockHeight = blockHeight;
+    htmlIndex += 1;
+  }
+  if (htmlClips.length > 0) {
+    job.phase = 'encode';
+    job.phaseStartedAt = new Date().toISOString();
+  }
   project.clips.forEach((clip) => {
-    if (clip.kind === 'blur' || clip.kind === 'text' || clip.kind === 'color') return;
+    if (clip.kind === 'blur' || clip.kind === 'text' || clip.kind === 'color' || clip.kind === 'html') return;
     clip.inputIndex = inputIndex;
     inputIndex += 1;
     if (clip.kind === 'image') args.push('-loop', '1', '-framerate', '30');
     const inputPath = clip._svgPngPath || path.join(UPLOAD_DIR, clip.media.storedName);
     args.push('-i', inputPath);
   });
-  const { width, height } = project.canvas;
+  for (const clip of project.clips) {
+    if (clip.kind !== 'html') continue;
+    clip.inputIndex = inputIndex;
+    inputIndex += 1;
+    args.push('-framerate', '30', '-start_number', '1', '-i', path.join(clip._htmlFramesDir, 'frame-%04d.png'));
+  }
   const filters = [`color=c=black:s=${width}x${height}:r=30:d=${project.duration.toFixed(3)}[base]`];
   const videos = [];
   const audios = [];
@@ -1769,6 +1862,27 @@ async function renderProject(jobId, project) {
         `[colorfull${index}];` +
         `[colorfull${index}]crop=w=${pw}:h=${ph}:x=${px}:y=${py}` +
         `[${blockLabel}]`
+      );
+      videos.push({
+        label: blockLabel,
+        start: clip.start,
+        end: clip.start + length,
+        trackIndex: clip.trackIndex || 0,
+        transitionIn: null,
+        overlayX: px,
+        overlayY: py
+      });
+    }
+    if (clip.kind === 'html') {
+      const html = clip.html;
+      const blockLabel = `htmlblock${index}`;
+      const pw = clip._htmlBlockWidth;
+      const ph = clip._htmlBlockHeight;
+      const px = Math.max(0, Math.round(html.x * width - pw / 2));
+      const py = Math.max(0, Math.round(html.y * height - ph / 2));
+      filters.push(
+        `[${clip.inputIndex}:v]setpts=PTS-STARTPTS+${clip.start.toFixed(3)}/TB,` +
+        `format=rgba,scale=${pw}:${ph},setsar=1[${blockLabel}]`
       );
       videos.push({
         label: blockLabel,
@@ -1982,7 +2096,7 @@ async function renderProject(jobId, project) {
 
   function cleanupTextFiles() {
     for (const file of temporaryTextFiles) fsp.unlink(file).catch(() => {});
-    for (const file of tempPngs) fsp.unlink(file).catch(() => {});
+    for (const file of tempPngs) fsp.rm(file, { recursive: true, force: true }).catch(() => {});
   }
 }
 
@@ -2039,5 +2153,6 @@ module.exports = {
   textAnimationExpressions,
   buildAssSubtitle,
   renderProject,
+  renderHtmlBlockFrames,
   jobs
 };

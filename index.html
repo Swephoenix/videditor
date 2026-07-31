@@ -26,6 +26,7 @@
         <button id="add-blur">Lägg till blur</button>
         <button id="add-text">Lägg till text</button>
         <button id="add-color">Lägg till färgblock</button>
+        <button id="add-html">Lägg till HTML</button>
         <button id="add-transition">Lägg till övergång</button>
         <button id="split" aria-keyshortcuts="S" title="Dela vid spelhuvud (S)">Dela vid spelhuvud</button>
         <button id="remove" aria-keyshortcuts="Delete Backspace" title="Ta bort markerat klipp (Delete)" disabled>Ta bort</button>
@@ -99,6 +100,7 @@
           <img id="image-preview" alt="Förhandsvisning av bild" hidden>
           <audio id="timeline-audio" preload="metadata" hidden></audio>
           <div id="blur-layer" class="blur-layer" aria-hidden="true"></div>
+          <div id="html-layer" class="html-layer" aria-hidden="true"></div>
           <div id="transcript-overlay" class="transcript-overlay" aria-hidden="true" hidden></div>
           <div id="crop-overlay" class="crop-overlay" aria-hidden="true" hidden>
             <div class="crop-mask" id="crop-mask-t"></div>
@@ -223,6 +225,19 @@
         </div>
         <p class="text-hint">Dra texten direkt i förhandsvisningen för fri positionering.</p>
       </section>
+      <section id="html-tools" class="html-tools" aria-label="Anpassa markerat HTML-block" hidden>
+        <div class="crop-heading">
+          <strong>HTML-block</strong>
+        </div>
+        <div class="html-grid">
+          <label class="html-full">Kod <textarea id="html-code" class="html-input" data-property="code" rows="8" spellcheck="false" placeholder="&lt;div style=&quot;color:white;font-size:48px&quot;&gt;Hej!&lt;/div&gt;"></textarea></label>
+          <label>X <output class="val-html-x">50</output><input class="html-input" data-property="x" type="range" min="0" max="1" step="0.01" value="0.5"></label>
+          <label>Y <output class="val-html-y">50</output><input class="html-input" data-property="y" type="range" min="0" max="1" step="0.01" value="0.5"></label>
+          <label>Bredd <output class="val-html-width">50</output><input class="html-input" data-property="width" type="range" min="0.05" max="1" step="0.01" value="0.5"></label>
+          <label>Höjd <output class="val-html-height">50</output><input class="html-input" data-property="height" type="range" min="0.05" max="1" step="0.01" value="0.5"></label>
+          <p class="html-hint">CSS-animationer och JavaScript spelas upp i realtid under export. Koden renderas som ett transparent block ovanpå videon.</p>
+        </div>
+      </section>
       <section id="audio-tools" class="audio-tools" aria-label="Ljudanalys och brusreducering" hidden>
         <div class="crop-heading">
           <strong>Ljudanalys</strong>
@@ -273,6 +288,10 @@
     <button class="quick-tool" id="qt-color" title="Lägg till färgblock">
       <svg width="20" height="20" aria-hidden="true"><use href="#icon-color"></use></svg>
       <span>Färg</span>
+    </button>
+    <button class="quick-tool" id="qt-html" title="Lägg till HTML-block">
+      <span class="html-tool-icon" aria-hidden="true">&lt;/&gt;</span>
+      <span>HTML</span>
     </button>
     <button class="quick-tool" id="qt-split" title="Dela vid spelhuvud (S)">
       <svg width="20" height="20" aria-hidden="true"><use href="#icon-split-playhead"></use></svg>
