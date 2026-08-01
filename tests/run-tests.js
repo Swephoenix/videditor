@@ -6,6 +6,7 @@ const { spawnSync } = require('child_process');
 const tests = [
   'timeline-track-model-test.js',
   'bugfix-regression-test.js',
+  'ai-upscale-test.js',
   'export-render-test.js',
   'multitrack-test.js',
   'transcription-search-test.js',

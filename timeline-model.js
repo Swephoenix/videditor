@@ -52,7 +52,9 @@
   }
 
   function compactTrackAssignments(clips, liftedIds = []) {
-    const lifted = new Set(Array.isArray(liftedIds) ? liftedIds : (liftedIds ? [liftedIds] : []));
+    const liftedOrder = Array.isArray(liftedIds) ? liftedIds : (liftedIds ? [liftedIds] : []);
+    const lifted = new Set(liftedOrder);
+    const liftedRank = new Map(liftedOrder.map((id, index) => [id, index]));
     const result = (clips || []).map((clip) => ({ ...clip }));
     const visual = result.filter((clip) => VISUAL.has(clip.kind));
     for (let pass = 0; pass < 20; pass += 1) {
@@ -62,13 +64,23 @@
           const a = visual[ki], b = visual[kj];
           if (a.id !== b.id && (a.trackIndex || 0) === (b.trackIndex || 0) && overlaps(a.start, clipEnd(a), b.start, clipEnd(b))) {
             let mover = b;
-            if (lifted.has(a.id) && !lifted.has(b.id)) mover = a;
+            const aLifted = lifted.has(a.id);
+            const bLifted = lifted.has(b.id);
+            if (aLifted && !bLifted) mover = a;
+            if (aLifted && bLifted && liftedRank.get(a.id) > liftedRank.get(b.id)) mover = a;
             mover.trackIndex = (mover.trackIndex || 0) + 1;
             anyConflict = true;
           }
         }
       }
       if (!anyConflict) break;
+    }
+    const usedVisualTracks = [...new Set(visual.map((clip) =>
+      Number.isFinite(clip.trackIndex) ? clip.trackIndex : 0
+    ))].sort((a, b) => a - b);
+    const denseTrackIndex = new Map(usedVisualTracks.map((trackIndex, index) => [trackIndex, index]));
+    for (const clip of visual) {
+      clip.trackIndex = denseTrackIndex.get(Number.isFinite(clip.trackIndex) ? clip.trackIndex : 0) || 0;
     }
     for (const clip of result) {
       if (clip.kind === 'audio') clip.trackIndex = 0;

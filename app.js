@@ -8,23 +8,6 @@ const MIN_PX_PER_SECOND = 8;
 const MAX_PX_PER_SECOND = 320;
 let timelinePixelsPerSecond = DEFAULT_PX_PER_SECOND;
 const waveformCache = new Map();
-let sharedAudioCtx = null;
-let audioCtxPending = [];
-function initAudioContext() {
-  if (sharedAudioCtx) return sharedAudioCtx;
-  sharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  if (sharedAudioCtx.state === 'suspended') sharedAudioCtx.resume();
-  for (const fn of audioCtxPending) fn(sharedAudioCtx);
-  audioCtxPending = [];
-  return sharedAudioCtx;
-}
-function waitAudioContext() {
-  if (sharedAudioCtx) return Promise.resolve(sharedAudioCtx);
-  return new Promise((resolve) => {
-    audioCtxPending.push(resolve);
-    document.addEventListener('pointerdown', initAudioContext, { once: true });
-  });
-}
 const MIN_CLIP_SECONDS = 0.1;
 const MAX_IMAGE_SECONDS = 4 * 60 * 60;
 const MIN_TIMELINE_SECONDS = 90;
@@ -51,6 +34,8 @@ const elements = {
   timelineLabels: document.querySelector('.track-labels'),
   scroll: document.querySelector('#timeline-scroll'),
   playhead: document.querySelector('#playhead'),
+  playheadFollow: document.querySelector('#playhead-follow'),
+  timelineLinkConnectors: document.querySelector('#timeline-link-connectors'),
   visualTrack: document.querySelector('#visual-track'),
   transcriptionTrack: document.querySelector('#transcription-track'),
   transcriptionLabel: document.querySelector('#transcription-label'),
@@ -112,6 +97,7 @@ const elements = {
   transcriptOverlay: document.querySelector('#transcript-overlay'),
   transcribe: document.querySelector('#transcribe'),
   clipContextMenu: document.querySelector('#clip-context-menu'),
+  separateFromAudio: document.querySelector('#separate-from-audio'),
   transcriptSearchInput: document.querySelector('#transcript-search-input'),
   transcriptSearchPrevious: document.querySelector('#transcript-search-previous'),
   transcriptSearchNext: document.querySelector('#transcript-search-next'),
@@ -160,7 +146,8 @@ const elements = {
   transitionHelp: document.querySelector('#transition-help'),
   transitionDuration: document.querySelector('#transition-duration'),
   transitionDurationValue: document.querySelector('#transition-duration-value'),
-  removeTransition: document.querySelector('#remove-transition')
+  removeTransition: document.querySelector('#remove-transition'),
+  linkToggle: document.querySelector('#qt-link')
 };
 
 const CANVAS_PRESETS = Object.freeze({
@@ -184,6 +171,7 @@ document.querySelector('#add-html').addEventListener('click', addHtmlClip);
 document.querySelector('#qt-color').addEventListener('click', addColorClip);
 document.querySelector('#add-transition').addEventListener('click', openTransitionPicker);
 document.querySelector('#qt-transition').addEventListener('click', openTransitionPicker);
+elements.linkToggle.addEventListener('click', toggleSelectedLink);
 document.querySelector('#close-transition').addEventListener('click', closeTransitionPicker);
 elements.canvasFormat.addEventListener('change', applyCanvasFormat);
 elements.canvasWidth.addEventListener('change', applyCustomCanvasSize);
@@ -308,6 +296,10 @@ elements.transcribe.addEventListener('click', () => {
   const clip = state.clips.find((item) => item.id === state.selectedId);
   hideClipContextMenu();
   transcribeClip(clip);
+});
+elements.separateFromAudio.addEventListener('click', () => {
+  hideClipContextMenu();
+  separateAudioFromVideo();
 });
 elements.captureNoisePrint.addEventListener('click', captureNoisePrint);
 elements.applyNoiseReduction.addEventListener('click', applyNoiseReduction);
@@ -440,21 +432,24 @@ elements.timeline.addEventListener('contextmenu', (event) => {
   }
   const clip = state.clips.find((item) => item.id === clipElement.dataset.id);
   if (!clip) return;
-  if (clip.kind !== 'audio') {
+  if (clip.kind !== 'audio' && clip.kind !== 'video') {
     hideClipContextMenu();
     return;
   }
   event.preventDefault();
   if (state.playing) stopPlayback();
   selectClip(clip.id);
-  elements.transcribe.disabled = false;
-  elements.transcribe.title = '';
+  const isAudio = clip.kind === 'audio';
+  elements.transcribe.hidden = !isAudio;
+  elements.separateFromAudio.hidden = isAudio;
+  elements.transcribe.disabled = !isAudio;
+  elements.transcribe.title = isAudio ? '' : 'Högerklicka på ett ljudklipp för att transkribera.';
   elements.clipContextMenu.hidden = false;
   const menuWidth = elements.clipContextMenu.offsetWidth || 180;
   const menuHeight = elements.clipContextMenu.offsetHeight || 48;
   elements.clipContextMenu.style.left = `${Math.max(4, Math.min(event.clientX, window.innerWidth - menuWidth - 4))}px`;
   elements.clipContextMenu.style.top = `${Math.max(4, Math.min(event.clientY, window.innerHeight - menuHeight - 4))}px`;
-  elements.transcribe.focus();
+  (isAudio ? elements.transcribe : elements.separateFromAudio).focus();
 });
 document.addEventListener('pointerdown', (event) => {
   if (!(event.target instanceof Element) || !event.target.closest('#clip-context-menu')) hideClipContextMenu();
@@ -760,7 +755,7 @@ function clearPersisted() {
 
 function cleanEmptyVisualTracks() {
   const used = new Set(state.clips.filter((c) => VISUAL_KINDS.includes(c.kind)).map((c) => c.trackIndex || 0));
-  const keep = state.visualTrackEls.map((_, i) => used.has(i));
+  const keep = state.visualTrackEls.map((_, i) => i === 0 || used.has(i));
   const oldToNew = [];
   let newIdx = 0;
   for (let i = 0; i < keep.length; i += 1) {
@@ -810,7 +805,9 @@ function restoreEditor(snapshot) {
   state.blurDrag = null;
   state.cropActive = false;
   elements.cropTools.hidden = true;
-  state.clips = timelineModel.compactTrackAssignments(cloneValue(snapshot.clips));
+  const restoredClips = Array.isArray(snapshot.clips) ? cloneValue(snapshot.clips) : [];
+  restoredClips.forEach(normalizeRestoredClip);
+  state.clips = timelineModel.compactTrackAssignments(restoredClips);
   state.transcriptionMediaId = snapshot.transcriptionMediaId || null;
   state.transcriptionSegments = Array.isArray(snapshot.transcriptionSegments) ? cloneValue(snapshot.transcriptionSegments) : [];
   rebuildTranscriptionIndex();
@@ -895,7 +892,7 @@ async function initialize() {
   if (editorHistory.undo.length === 0) recordHistory();
   requestAnimationFrame(updatePreviewWindowSize);
   if (saveTimer) clearInterval(saveTimer);
-  saveTimer = setInterval(autoSaveProject, 30000);
+  if (!/jsdom/i.test(navigator.userAgent)) saveTimer = setInterval(autoSaveProject, 30000);
   if (!saved) {
     try {
       const remote = await api('/api/project/autoload');
@@ -934,6 +931,41 @@ function updateTimelineWidth() {
   elements.timeline.dataset.duration = String(duration);
   elements.timeline.style.width = `${secondsToPixels(duration)}px`;
   if (durationChanged) buildRuler(duration);
+  updatePlayheadFollowIndicator();
+}
+
+function updatePlayheadFollowIndicator() {
+  const viewportWidth = elements.scroll.clientWidth;
+  const contentWidth = elements.scroll.scrollWidth;
+  const playheadX = secondsToPixels(state.playhead);
+  const visibleRight = elements.scroll.scrollLeft + viewportWidth;
+  const scrollRect = elements.scroll.getBoundingClientRect();
+  const playheadRect = elements.playhead.getBoundingClientRect();
+  const hasLayoutRects = scrollRect.width > 0 && playheadRect.width > 0;
+  const isOutsideRight = viewportWidth > 0 && contentWidth > viewportWidth + 1 && (
+    hasLayoutRects
+      ? playheadRect.left >= scrollRect.right - 1
+      : playheadX >= visibleRight
+  );
+  elements.playheadFollow.hidden = !isOutsideRight;
+  elements.playheadFollow.setAttribute('aria-hidden', String(!isOutsideRight));
+}
+
+function revealPlayhead() {
+  const viewportWidth = elements.scroll.clientWidth;
+  const contentWidth = elements.scroll.scrollWidth;
+  if (!viewportWidth || contentWidth <= viewportWidth) return;
+  const target = clamp(
+    secondsToPixels(state.playhead) - viewportWidth * 0.5,
+    0,
+    contentWidth - viewportWidth
+  );
+  if (typeof elements.scroll.scrollTo === 'function') {
+    elements.scroll.scrollTo({ left: target, behavior: 'smooth' });
+  } else {
+    elements.scroll.scrollLeft = target;
+  }
+  updatePlayheadFollowIndicator();
 }
 
 function updateTimelineZoom(nextScale, clientX) {
@@ -961,8 +993,11 @@ elements.scroll.addEventListener('wheel', (event) => {
 }, { passive: false });
 elements.scroll.addEventListener('scroll', () => {
   elements.timelineLabels.scrollTop = elements.scroll.scrollTop;
+  updatePlayheadFollowIndicator();
   if (state.action?.type === 'marquee' && state.action.active) updateMarqueeSelection();
 });
+elements.playheadFollow.addEventListener('click', revealPlayhead);
+window.addEventListener('resize', updatePlayheadFollowIndicator);
 
 async function uploadFile(input) {
   const file = input.files?.[0];
@@ -1079,6 +1114,27 @@ async function separateAudio() {
   } finally {
     elements.separateAudio.disabled = false;
     elements.separateAudio.textContent = 'Separera ljud';
+  }
+}
+
+async function separateAudioFromVideo() {
+  const selected = state.clips.find((clip) => clip.id === state.selectedId);
+  if (!selected || selected.kind !== 'video') {
+    return alert('Välj ett video-klipp först för att separera ljudet.');
+  }
+  if (!selected.mediaDuration) return alert('Det valda klippet saknar längd.');
+  recordHistory();
+  try {
+    elements.separateFromAudio.disabled = true;
+    const audioClip = await autoSplitAudio(selected);
+    if (!audioClip) return;
+    unlinkClipPair(selected, { recordHistory: false });
+    selectClip(audioClip.id);
+    persist();
+  } catch (error) {
+    alert(`Kunde inte separera ljud: ${error.message}`);
+  } finally {
+    elements.separateFromAudio.disabled = false;
   }
 }
 
@@ -1611,31 +1667,6 @@ function allocateTrack(kind, start, end, ignoreId = null) {
   return timelineModel.firstFreeTrack(state.clips, trackKinds(kind), start, end, ignoreId);
 }
 
-function insertVisualTrack(atIndex) {
-  const track = document.createElement('div');
-  track.className = 'track visual-track';
-  const label = document.createElement('div');
-  label.className = 'track-label';
-  const refTrack = state.visualTrackEls[atIndex] || state.visualTrackEls.at(-1);
-  const refLabel = state.visualLabelEls[atIndex] || state.visualLabelEls.at(-1);
-  const labelText = `V${atIndex + 1}`;
-  label.textContent = labelText;
-  elements.timelineLabels.insertBefore(label, refLabel);
-  elements.timelineTracks.insertBefore(track, refTrack);
-  state.visualTrackEls.splice(atIndex, 0, track);
-  state.visualLabelEls.splice(atIndex, 0, label);
-  if (atIndex === 0) track.id = 'visual-track';
-  for (let i = 0; i < state.visualLabelEls.length; i += 1) {
-    state.visualLabelEls[i].textContent = `V${i + 1}`;
-  }
-  for (const clip of state.clips) {
-    if (VISUAL_KINDS.includes(clip.kind) && (clip.trackIndex || 0) >= atIndex) {
-      clip.trackIndex = (clip.trackIndex || 0) + 1;
-    }
-  }
-  return track;
-}
-
 function ensureVisualTrack(index) {
   while (state.visualTrackEls.length <= index) {
     const trackIndex = state.visualTrackEls.length;
@@ -1784,21 +1815,69 @@ function renderClip(clip) {
     (clip.transitionIn ? `\n◇ ${clip.transitionIn.type} · ${clip.transitionIn.duration.toFixed(1)} s` : '');
   if (clip.kind === 'audio') {
     let canvas = element.querySelector('.clip-waveform');
-    const w = Math.max(8, Math.round(secondsToPixels(clipDuration(clip)))) || 8;
+    const displayWidth = Math.max(8, Math.round(secondsToPixels(clipDuration(clip)))) || 8;
+    const w = Math.min(2000, displayWidth);
     const h = 64;
-    if (!canvas || canvas.width !== w || canvas.height !== h) {
+    if (!canvas || canvas.width !== w || canvas.height !== h || canvas.style.width !== `${displayWidth}px`) {
       if (canvas) canvas.remove();
       canvas = document.createElement('canvas');
       canvas.className = 'clip-waveform';
       canvas.width = w;
       canvas.height = h;
-      canvas.style.width = `${w}px`;
+      canvas.style.width = `${displayWidth}px`;
       canvas.style.height = '64px';
       element.insertBefore(canvas, element.firstChild);
     }
     drawTimelineWaveform(canvas, clip);
   }
+  renderTimelineLinkConnectors();
   updateTimelineWidth();
+}
+
+function renderTimelineLinkConnectors() {
+  const layer = elements.timelineLinkConnectors;
+  if (!layer) return;
+  layer.replaceChildren();
+  const groups = new Map();
+  for (const clip of state.clips) {
+    if (!clip.linkGroupId) continue;
+    const group = groups.get(clip.linkGroupId) || [];
+    group.push(clip);
+    groups.set(clip.linkGroupId, group);
+  }
+  const timelineRect = elements.timeline.getBoundingClientRect();
+  for (const clips of groups.values()) {
+    const video = clips.find((clip) => clip.kind === 'video');
+    const audio = clips.find((clip) => clip.kind === 'audio');
+    if (!video || !audio) continue;
+    const videoElement = document.querySelector(`.clip[data-id="${CSS.escape(video.id)}"]`);
+    const audioElement = document.querySelector(`.clip[data-id="${CSS.escape(audio.id)}"]`);
+    if (!videoElement || !audioElement) continue;
+    const videoRect = videoElement.getBoundingClientRect();
+    const audioRect = audioElement.getBoundingClientRect();
+    const hasLayoutRects = videoRect.width > 0 && audioRect.width > 0 && timelineRect.width > 0;
+    const overlapStart = Math.max(video.start, audio.start);
+    const overlapEnd = Math.min(video.start + clipDuration(video), audio.start + clipDuration(audio));
+    const centerTime = overlapStart < overlapEnd
+      ? overlapStart + (overlapEnd - overlapStart) / 2
+      : Math.max(video.start, audio.start);
+    const connector = document.createElement('img');
+    connector.className = 'timeline-link-connector';
+    connector.src = '/chain.svg?v=0.15.2';
+    connector.alt = '';
+    if (hasLayoutRects) {
+      const topEdge = videoRect.bottom <= audioRect.top ? videoRect.bottom : audioRect.bottom;
+      const bottomEdge = videoRect.bottom <= audioRect.top ? audioRect.top : videoRect.top;
+      connector.style.left = `${secondsToPixels(centerTime) - 9}px`;
+      connector.style.top = `${topEdge - timelineRect.top}px`;
+      connector.style.height = `${Math.max(20, bottomEdge - topEdge)}px`;
+    } else {
+      connector.style.left = `${secondsToPixels(centerTime) - 9}px`;
+      connector.style.top = '90px';
+      connector.style.height = '36px';
+    }
+    layer.appendChild(connector);
+  }
 }
 
 function unlinkClipPair(clip, options = {}) {
@@ -1815,7 +1894,7 @@ function unlinkClipPair(clip, options = {}) {
 function describeClip(clip) {
   if (!clip) return 'Inget klipp markerat';
   if (clip.kind === 'blur') return `${clip.name} · start ${formatTime(clip.start)} · visas i ${clipDuration(clip).toFixed(2)} s`;
-  if (clip.kind === 'color') return `${clip.name} · start ${formatTime(clip.start)} · visas i ${clipDuration(clip).toFixed(2)} s · "${clip.color.color}"`;
+  if (clip.kind === 'color') return `${clip.name} · start ${formatTime(clip.start)} · visas i ${clipDuration(clip).toFixed(2)} s · "${normalizeColorBlock(clip.color).color}"`;
   if (clip.kind === 'html') return `${clip.name} · start ${formatTime(clip.start)} · visas i ${clipDuration(clip).toFixed(2)} s`;
   if (clip.kind === 'text') return `${clip.name} · start ${formatTime(clip.start)} · visas i ${clipDuration(clip).toFixed(2)} s · "${clip.text.text}"`;
   if (clip.kind === 'image') return `${clip.name} · start ${formatTime(clip.start)} · visas i ${clipDuration(clip).toFixed(2)} s`;
@@ -1857,6 +1936,7 @@ function selectClips(ids, primaryId = null, options = {}) {
   updateTextTools(clip);
   updateHtmlTools(clip);
   updateAudioTools(clip);
+  updateLinkTool();
   const anyTools = clip && (clip.kind === 'video' || clip.kind === 'image' || clip.kind === 'blur' || clip.kind === 'color' || clip.kind === 'text' || clip.kind === 'html' || clip.kind === 'audio');
   elements.toolsPanel.hidden = !anyTools;
   if (options.refreshPreview !== false) setPlayhead(state.playhead);
@@ -1864,6 +1944,50 @@ function selectClips(ids, primaryId = null, options = {}) {
 
 function selectClip(id) {
   selectClips(id ? [id] : [], id);
+}
+
+function selectedVideoAudioPair() {
+  const selected = state.clips.filter((clip) => state.selectedIds.has(clip.id));
+  if (selected.length !== 2) return null;
+  const video = selected.find((clip) => clip.kind === 'video');
+  const audio = selected.find((clip) => clip.kind === 'audio');
+  return video && audio ? { video, audio } : null;
+}
+
+function updateLinkTool() {
+  const pair = selectedVideoAudioPair();
+  const linked = Boolean(pair && pair.video.linkGroupId && pair.video.linkGroupId === pair.audio.linkGroupId);
+  elements.linkToggle.disabled = !pair;
+  elements.linkToggle.setAttribute('aria-pressed', String(linked));
+  elements.linkToggle.title = !pair
+    ? 'Markera exakt ett videoklipp och ett ljudklipp'
+    : linked
+      ? 'Separera markerat video- och ljudklipp'
+      : 'Länka markerat video- och ljudklipp';
+  const label = elements.linkToggle.querySelector('span');
+  if (label) label.textContent = linked ? 'Separera' : 'Länka';
+}
+
+function toggleSelectedLink() {
+  const pair = selectedVideoAudioPair();
+  if (!pair) return;
+  const linked = pair.video.linkGroupId && pair.video.linkGroupId === pair.audio.linkGroupId;
+  recordHistory();
+  if (linked) {
+    unlinkClipPair(pair.video, { recordHistory: false });
+    return;
+  }
+  const oldGroups = new Set([pair.video.linkGroupId, pair.audio.linkGroupId].filter(Boolean));
+  for (const clip of state.clips) {
+    if (oldGroups.has(clip.linkGroupId)) delete clip.linkGroupId;
+  }
+  const linkGroupId = crypto.randomUUID();
+  pair.video.linkGroupId = linkGroupId;
+  pair.audio.linkGroupId = linkGroupId;
+  renderClip(pair.video);
+  renderClip(pair.audio);
+  persist();
+  updateLinkTool();
 }
 
 function updateCropTools(clip) {
@@ -2110,6 +2234,29 @@ function defaultColorBlock() {
   return { color: '#e50914', x: 0.5, y: 0.5, width: 1, height: 1 };
 }
 
+function normalizeColorBlock(rawColor) {
+  const fallback = defaultColorBlock();
+  const raw = rawColor && typeof rawColor === 'object' ? rawColor : {};
+  const finiteOr = (value, fallbackValue) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallbackValue;
+  };
+  const width = clamp(finiteOr(raw.width, fallback.width), 0.05, 1);
+  const height = clamp(finiteOr(raw.height, fallback.height), 0.05, 1);
+  return {
+    color: typeof raw.color === 'string' && /^#[0-9a-f]{6}$/i.test(raw.color) ? raw.color : fallback.color,
+    x: clamp(finiteOr(raw.x, fallback.x), width / 2, 1 - width / 2),
+    y: clamp(finiteOr(raw.y, fallback.y), height / 2, 1 - height / 2),
+    width,
+    height
+  };
+}
+
+function normalizeRestoredClip(clip) {
+  if (clip?.kind === 'color') clip.color = normalizeColorBlock(clip.color);
+  return clip;
+}
+
 function addColorClip() {
   recordHistory();
   const clip = {
@@ -2155,6 +2302,7 @@ function updateColorTools(clip) {
   const canColor = clip?.kind === 'color';
   elements.colorTools.hidden = !canColor;
   if (canColor) {
+    clip.color = normalizeColorBlock(clip.color);
     const c = clip.color;
     elements.colorInputs.forEach((input) => {
       const property = input.dataset.property;
@@ -2537,7 +2685,7 @@ function renderWaveform(clip) {
   }
   ctx.fillStyle = '#1a3a22';
   ctx.fillRect(0, 0, w, h);
-  const entry = getAudioBuffer(clip.mediaId);
+  const entry = getWaveformData(clip.mediaId, clip.trimStart, clip.trimEnd, w);
   if (!entry) { ctx.fillText('Fel', w / 2, h / 2); return; }
   if (entry.loading) {
     ctx.fillStyle = '#3a6a4a';
@@ -2548,33 +2696,20 @@ function renderWaveform(clip) {
     if (!entry.callbacks.includes(redraw)) entry.callbacks.push(redraw);
     return;
   }
-  const buffer = entry.buffer;
-  if (!buffer) {
+  if (!entry.peaks) {
     ctx.fillStyle = '#3a6a4a';
     ctx.font = '12px system-ui';
     ctx.textAlign = 'center';
     ctx.fillText('Kunde inte ladda vågform', w / 2, h / 2);
     return;
   }
-  const peaks = computeWaveformPeaks(buffer, clip.trimStart, clip.trimEnd, w);
-  if (!peaks || peaks.length === 0) {
+  if (entry.peaks.length === 0) {
     ctx.fillText('Ingen data', w / 2, h / 2);
     return;
   }
   ctx.fillStyle = '#1a3a22';
   ctx.fillRect(0, 0, w, h);
-  const mid = h / 2;
-  const slice = Math.max(1, Math.floor(peaks.length / w));
-  ctx.strokeStyle = '#6cdf9c';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  for (let i = 0; i < w; i += 1) {
-    const idx = Math.min(Math.floor(i * slice), peaks.length - 1);
-    const amp = Math.max(1, peaks[idx] * mid * 0.95);
-    ctx.moveTo(i, mid - amp);
-    ctx.lineTo(i, mid + amp);
-  }
-  ctx.stroke();
+  drawWaveformPeaks(ctx, w, h, entry.peaks);
   const duration = clipDuration(clip);
   const selStart = Math.max(0, Math.min(Number(elements.noisePrintStart.value) || 0, duration));
   const selLen = Math.max(0, Math.min(Number(elements.noisePrintLength.value) || 0, duration - selStart));
@@ -2606,69 +2741,53 @@ function renderWaveform(clip) {
   ctx.textAlign = 'left';
   ctx.fillText(`${formatTime(clip.trimStart || 0)}`, 4, h - 4);
   ctx.textAlign = 'right';
-  ctx.fillText(`${formatTime(clip.trimEnd || buffer.duration)}`, w - 4, h - 4);
+  ctx.fillText(`${formatTime(clip.trimEnd || clip.trimStart + duration)}`, w - 4, h - 4);
 }
 
-function getAudioBuffer(mediaId) {
+function getWaveformData(mediaId, start, end, width) {
   if (!mediaId) return null;
-  if (waveformCache.has(mediaId)) return waveformCache.get(mediaId);
-  const entry = { loading: true, buffer: null, callbacks: [] };
-  waveformCache.set(mediaId, entry);
-  const url = `/api/media/${encodeURIComponent(mediaId)}/file`;
-  fetch(url)
-    .then((res) => { if (!res.ok) throw new Error(); return res.arrayBuffer(); })
-    .then(async (buffer) => {
-      const ctx = await waitAudioContext();
-      return ctx.decodeAudioData(buffer);
-    })
-    .then((audioBuffer) => {
-      const channelData = audioBuffer.getChannelData(0);
-      const sr = audioBuffer.sampleRate;
+  const normalizedStart = Math.max(0, Number(start) || 0);
+  const normalizedEnd = Math.max(normalizedStart + 0.01, Number(end) || normalizedStart + 0.01);
+  const normalizedWidth = Math.max(32, Math.min(2000, Math.round(Number(width) || 400)));
+  const key = `${mediaId}:${normalizedStart.toFixed(3)}:${normalizedEnd.toFixed(3)}:${normalizedWidth}`;
+  if (waveformCache.has(key)) return waveformCache.get(key);
+  const entry = { loading: true, peaks: null, callbacks: [] };
+  waveformCache.set(key, entry);
+  const params = new URLSearchParams({
+    start: normalizedStart.toFixed(3),
+    end: normalizedEnd.toFixed(3),
+    width: String(normalizedWidth)
+  });
+  fetch(`/api/media/${encodeURIComponent(mediaId)}/waveform?${params}`)
+    .then((res) => { if (!res.ok) throw new Error(); return res.json(); })
+    .then((data) => {
       entry.loading = false;
-      entry.buffer = { data: channelData, sampleRate: sr, duration: audioBuffer.duration };
+      entry.peaks = Array.isArray(data.peaks) ? data.peaks : null;
       for (const cb of entry.callbacks) cb();
       entry.callbacks = [];
     })
     .catch(() => {
       entry.loading = false;
-      entry.buffer = null;
+      entry.peaks = null;
       for (const cb of entry.callbacks) cb();
       entry.callbacks = [];
     });
   return entry;
 }
 
-function waitForBuffer(mediaId) {
-  return new Promise((resolve) => {
-    const entry = getAudioBuffer(mediaId);
-    if (!entry) { resolve(null); return; }
-    if (!entry.loading) { resolve(entry.buffer); return; }
-    entry.callbacks.push(() => resolve(entry.buffer));
+function drawWaveformPeaks(ctx, width, height, peaks, color = '#6cdf9c') {
+  if (!ctx || !Array.isArray(peaks) || peaks.length === 0) return;
+  const mid = height / 2;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  peaks.forEach((peak, index) => {
+    const x = (index / Math.max(1, peaks.length - 1)) * Math.max(0, width - 1);
+    const amplitude = Math.max(1, Number(peak) * mid * 0.95);
+    ctx.moveTo(x, mid - amplitude);
+    ctx.lineTo(x, mid + amplitude);
   });
-}
-
-function computeWaveformPeaks(buffer, trimStart, trimEnd, targetWidth) {
-  if (!buffer || !buffer.data) return null;
-  const channelData = buffer.data;
-  const sr = buffer.sampleRate;
-  const startS = Math.floor((trimStart || 0) * sr);
-  const endS = Math.ceil((trimEnd || buffer.duration) * sr);
-  const len = endS - startS;
-  if (len <= 0) return [];
-  const w = Math.max(1, Math.min(targetWidth || 400, 2000));
-  const step = Math.max(1, Math.floor(len / w));
-  const peaks = new Float32Array(w);
-  for (let i = 0; i < w; i += 1) {
-    let max = 0;
-    const offset = startS + i * step;
-    const end = Math.min(offset + step, endS);
-    for (let j = offset; j < end; j += 1) {
-      const abs = Math.abs(channelData[j]);
-      if (abs > max) max = abs;
-    }
-    peaks[i] = max;
-  }
-  return peaks;
+  ctx.stroke();
 }
 
 function drawTimelineWaveform(canvas, clip) {
@@ -2680,7 +2799,7 @@ function drawTimelineWaveform(canvas, clip) {
   const h = canvas.height;
   ctx.fillStyle = '#0f2517';
   ctx.fillRect(0, 0, w, h);
-  const entry = getAudioBuffer(clip.mediaId);
+  const entry = getWaveformData(clip.mediaId, clip.trimStart, clip.trimEnd, w);
   if (!entry || entry.loading) {
     ctx.fillStyle = '#0d1f12';
     ctx.font = '10px system-ui';
@@ -2694,8 +2813,7 @@ function drawTimelineWaveform(canvas, clip) {
     return;
   }
   setClipWaveformLoading(clip.id, false);
-  const buffer = entry.buffer;
-  if (!buffer) {
+  if (!entry.peaks) {
     ctx.fillStyle = '#1a1515';
     ctx.fillRect(0, 0, w, h);
     ctx.fillStyle = '#5a3a3a';
@@ -2704,20 +2822,7 @@ function drawTimelineWaveform(canvas, clip) {
     ctx.fillText('✕', w / 2, h / 2 + 3);
     return;
   }
-  const peaks = computeWaveformPeaks(buffer, clip.trimStart, clip.trimEnd, w);
-  if (!peaks || peaks.length === 0) return;
-  const mid = h / 2;
-  const samplesPerPx = Math.max(1, Math.floor(peaks.length / w));
-  ctx.strokeStyle = '#4ade80';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  for (let i = 0; i < w; i += 1) {
-    const idx = Math.min(Math.floor(i * samplesPerPx), peaks.length - 1);
-    const amp = Math.max(1, peaks[idx] * mid * 0.85);
-    ctx.moveTo(i, mid - amp);
-    ctx.lineTo(i, mid + amp);
-  }
-  ctx.stroke();
+  drawWaveformPeaks(ctx, w, h, entry.peaks, '#4ade80');
 }
 
 async function captureNoisePrint() {
@@ -2916,6 +3021,7 @@ function renderColorOverlays(time) {
 
   const selectedId = state.selectedId;
   active.forEach((clip) => {
+    clip.color = normalizeColorBlock(clip.color);
     const c = clip.color;
     let block = layer.querySelector(`.color-block[data-id="${CSS.escape(clip.id)}"]`);
     if (!block) {
@@ -3743,6 +3849,7 @@ function setPlayhead(seconds, updatePreview = true) {
   state.playhead = Math.max(0, seconds);
   updateTimelineWidth();
   elements.playhead.style.left = `${secondsToPixels(state.playhead)}px`;
+  updatePlayheadFollowIndicator();
   elements.timecode.textContent = formatTime(state.playhead);
   const p = state.playhead;
   const base = timelineModel.topActiveVisual(state.clips, p);
@@ -3867,6 +3974,16 @@ function finishMarquee(action) {
   }
 }
 
+elements.timeline.addEventListener('dblclick', (event) => {
+  const clipElement = event.target.closest('.clip[data-id]');
+  if (!clipElement || event.target.closest('button, .handle')) return;
+  const clip = state.clips.find((item) => item.id === clipElement.dataset.id);
+  if (!clip) return;
+  const point = timelinePointFromClient(event.clientX, event.clientY);
+  setPlayhead(pixelsToSeconds(point.x));
+  event.preventDefault();
+});
+
 elements.timeline.addEventListener('mousedown', (event) => {
   if (event.button !== 0) return;
   if (state.playing) stopPlayback();
@@ -3906,6 +4023,7 @@ elements.timeline.addEventListener('mousedown', (event) => {
       .map((item) => ({
         clip: item,
         originalStart: item.start,
+        originalTrackIndex: Number.isFinite(item.trackIndex) ? item.trackIndex : 0,
         originalTransitionCut: item.transitionIn?.cut
       }));
     state.action = {
@@ -3939,6 +4057,39 @@ elements.timeline.addEventListener('mousedown', (event) => {
   if (state.action) event.preventDefault();
 });
 
+function recordTimelineActionHistory(action) {
+  if (action.historyRecorded) return;
+  pushHistorySnapshot(action.snapshot);
+  action.historyRecorded = true;
+}
+
+function moveDraggedVisualClipsToTrack(action, targetTrackIndex) {
+  const movingVisual = action.movingClips.filter((item) => VISUAL_KINDS.includes(item.clip.kind));
+  const primary = movingVisual.find((item) => item.clip.id === action.clip.id);
+  if (!primary || !movingVisual.length) return false;
+  const minimumTrack = Math.min(...movingVisual.map((item) => item.originalTrackIndex));
+  const requestedDelta = targetTrackIndex - primary.originalTrackIndex;
+  const trackDelta = Math.max(-minimumTrack, requestedDelta);
+  const assignments = movingVisual.map((item) => ({
+    item,
+    trackIndex: item.originalTrackIndex + trackDelta
+  }));
+  if (assignments.every(({ item, trackIndex }) => (item.clip.trackIndex || 0) === trackIndex)) return false;
+
+  recordTimelineActionHistory(action);
+  ensureVisualTrack(Math.max(...assignments.map(({ trackIndex }) => trackIndex)));
+  for (const { item, trackIndex } of assignments) {
+    const clip = item.clip;
+    clip.trackIndex = trackIndex;
+    const element = document.querySelector(`.clip[data-id="${CSS.escape(clip.id)}"]`);
+    if (element && element.parentNode !== state.visualTrackEls[trackIndex]) {
+      element.remove();
+      ensureVisualTrack(trackIndex).appendChild(element);
+    }
+  }
+  return true;
+}
+
 document.addEventListener('mousemove', (event) => {
   if (!state.action) return;
   if (state.action.type === 'marquee') {
@@ -3961,8 +4112,7 @@ document.addEventListener('mousemove', (event) => {
   }
   const { clip, original } = action;
   if (!action.historyRecorded && Math.abs(delta) > 0.0001) {
-    pushHistorySnapshot(action.snapshot);
-    action.historyRecorded = true;
+    recordTimelineActionHistory(action);
   }
   if (action.type === 'drag') {
     const minimumStart = Math.min(...action.movingClips.map((item) => item.originalStart));
@@ -3976,44 +4126,20 @@ document.addEventListener('mousemove', (event) => {
     }
     const yDelta = event.clientY - action.originY;
     if (Math.abs(yDelta) >= 45) {
-      const trackEl = event.target.closest('.track') || document.elementFromPoint(event.clientX, event.clientY)?.closest('.track');
+      const trackEl = event.target.closest('.track') || document.elementFromPoint?.(event.clientX, event.clientY)?.closest('.track');
       if (trackEl?.classList.contains('visual-track')) {
         const trackIndex = state.visualTrackEls.indexOf(trackEl);
         if (trackIndex >= 0) {
           action.originY = event.clientY;
-          for (const moving of action.movingClips) {
-            const c = moving.clip;
-            if (c.kind === 'audio') continue;
-            const oldTrackIndex = c.trackIndex || 0;
-            c.trackIndex = trackIndex;
-            if (oldTrackIndex !== trackIndex) {
-              const el = document.querySelector(`.clip[data-id="${CSS.escape(c.id)}"]`);
-              if (el && el.parentNode) {
-                el.remove();
-                ensureVisualTrack(trackIndex).appendChild(el);
-              }
-            }
-          }
+          moveDraggedVisualClipsToTrack(action, trackIndex);
         }
       } else {
-        const timelineRect = elements.timelineTracks.getBoundingClientRect();
-        const firstTrack = state.visualTrackEls[0];
-        if (firstTrack) {
-          const firstRect = firstTrack.getBoundingClientRect();
-          const trackHeight = firstRect.height || 90;
-          if (event.clientY < firstRect.top) {
+        const topTrack = state.visualTrackEls.at(-1);
+        if (topTrack) {
+          const topRect = topTrack.getBoundingClientRect();
+          if (event.clientY < topRect.top) {
             action.originY = event.clientY;
-            insertVisualTrack(0);
-            for (const moving of action.movingClips) {
-              const c = moving.clip;
-              if (c.kind === 'audio') continue;
-              c.trackIndex = 0;
-              const el = document.querySelector(`.clip[data-id="${CSS.escape(c.id)}"]`);
-              if (el && el.parentNode) {
-                el.remove();
-                ensureVisualTrack(0).appendChild(el);
-              }
-            }
+            moveDraggedVisualClipsToTrack(action, state.visualTrackEls.length);
           }
         }
       }
@@ -4045,11 +4171,15 @@ document.addEventListener('mouseup', () => {
     finishMarquee(action);
     return;
   }
-  const changedClip = state.action?.clip;
-  const changedClips = state.action?.movingClips?.map((item) => item.clip) || (changedClip ? [changedClip] : []);
-  const movedIds = state.action?.movingClips?.map((item) => item.clip.id) || (changedClip ? [changedClip.id] : []);
+  const completedAction = state.action;
+  const changedClip = completedAction?.clip;
+  const changedClips = completedAction?.movingClips?.map((item) => item.clip) || (changedClip ? [changedClip] : []);
+  const movedIds = completedAction?.movingClips
+    ?.slice()
+    .sort((a, b) => a.originalTrackIndex - b.originalTrackIndex)
+    .map((item) => item.clip.id) || (changedClip ? [changedClip.id] : []);
   state.action = null;
-  if (changedClip) rebuildTrackLayout(movedIds);
+  if (changedClip && completedAction.historyRecorded) rebuildTrackLayout(movedIds);
   if (changedClips.some((clip) => clip.mediaId === state.transcriptionMediaId)) renderTranscription();
 });
 
@@ -4317,7 +4447,7 @@ async function pollJob(id) {
       return;
     }
     if (job.status === 'upscaling') {
-      elements.exportMessage.textContent = `AI upscaling (video-upscale) · ${job.progress || 0} %${eta ? ` · ${eta}` : ''}`;
+      elements.exportMessage.textContent = `AI super-resolution 2× · ${job.progress || 0} %${eta ? ` · ${eta}` : ''}`;
     }
     elements.cancelExport.hidden = false;
     elements.cancelExport.disabled = false;
@@ -4409,7 +4539,7 @@ async function loadProject() {
     state.clips = timelineModel.compactTrackAssignments(data.clips.map((clip) => {
       if (clip.crop && typeof clip.crop === 'object') clip.crop = { left: clip.crop.left || 0, right: clip.crop.right || 0, top: clip.crop.top || 0, bottom: clip.crop.bottom || 0 };
       if (clip.blur) clip.blur = normalizeBlur(clip.blur);
-      return { id: crypto.randomUUID(), ...clip };
+      return normalizeRestoredClip({ id: crypto.randomUUID(), ...clip });
     }));
     state.selectedId = null;
     state.selectedIds = new Set();

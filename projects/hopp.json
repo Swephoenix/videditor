@@ -1,0 +1,145 @@
+{
+  "version": 2,
+  "createdAt": "2026-08-01T13:53:14.840Z",
+  "canvas": {
+    "width": 1280,
+    "height": 720
+  },
+  "playhead": 2.1,
+  "transcriptionMediaId": null,
+  "transcriptionSegments": [],
+  "clips": [
+    {
+      "mediaId": "6f885313-a205-4c19-b0bb-fc456ee3f9e5",
+      "mediaDuration": 10.041667,
+      "sourceWidth": 1888,
+      "sourceHeight": 1096,
+      "kind": "video",
+      "start": 0,
+      "trimStart": 0,
+      "trimEnd": 4.9569399999999995,
+      "crop": {
+        "left": 0,
+        "right": 0,
+        "top": 0,
+        "bottom": 0
+      },
+      "muted": true,
+      "trackIndex": 1,
+      "name": "kling-v3_a_Animate_pov_scene_wh.mp4",
+      "visualScale": 1
+    },
+    {
+      "mediaId": "0bef03a0-4fc6-45b2-a301-0ae798e52e09",
+      "mediaDuration": 5.039002,
+      "sourceWidth": 0,
+      "sourceHeight": 0,
+      "kind": "audio",
+      "start": 0,
+      "trimStart": 0,
+      "trimEnd": 5.039002,
+      "crop": {
+        "left": 0,
+        "right": 0,
+        "top": 0,
+        "bottom": 0
+      },
+      "muted": false,
+      "trackIndex": 0,
+      "name": "kling-v3_a_Animate_pov_scene_wh_ljud.m4a"
+    },
+    {
+      "mediaDuration": 14400,
+      "kind": "text",
+      "start": 5.1999999999999975,
+      "trimStart": 0,
+      "trimEnd": 1.375,
+      "text": {
+        "text": "Du hade inte tillåtit en vän\nhoppa.",
+        "presetId": "slide",
+        "variant": "standard",
+        "fontSize": 0.07,
+        "color": "#FFFFFF",
+        "background": "none",
+        "x": 0.5,
+        "y": 0.5,
+        "scaleX": 1,
+        "animIn": {
+          "type": "slide-left",
+          "duration": 0.5
+        },
+        "animOut": {
+          "type": "fade",
+          "duration": 0.3
+        }
+      },
+      "trackIndex": 2,
+      "name": "Text"
+    },
+    {
+      "mediaDuration": 14400,
+      "kind": "color",
+      "start": 5.075000000000001,
+      "trimStart": 0,
+      "trimEnd": 3.75,
+      "trackIndex": 0,
+      "name": "Färgblock"
+    },
+    {
+      "mediaDuration": 14400,
+      "kind": "text",
+      "start": 6.825,
+      "trimStart": 0,
+      "trimEnd": 2,
+      "text": {
+        "text": "Tillåt då inte våra politiker tvinga vårt folk\ntill samma beslut genom onödiga\nkrig.",
+        "presetId": "slide",
+        "variant": "standard",
+        "fontSize": 0.07,
+        "color": "#FFFFFF",
+        "background": "none",
+        "x": 0.5,
+        "y": 0.5,
+        "scaleX": 1,
+        "animIn": {
+          "type": "slide-left",
+          "duration": 0.5
+        },
+        "animOut": {
+          "type": "fade",
+          "duration": 0.3
+        }
+      },
+      "trackIndex": 2,
+      "name": "Text"
+    },
+    {
+      "mediaDuration": 14400,
+      "kind": "color",
+      "start": 8.9,
+      "trimStart": 0,
+      "trimEnd": 3,
+      "trackIndex": 0,
+      "name": "Färgblock"
+    },
+    {
+      "mediaId": "093603cf-315c-4317-bdd7-2e4b5bf388f8",
+      "mediaDuration": 14400,
+      "sourceWidth": 1200,
+      "sourceHeight": 461,
+      "kind": "image",
+      "start": 8.98194,
+      "trimStart": 0,
+      "trimEnd": 2.75,
+      "crop": {
+        "left": 0,
+        "right": 0,
+        "top": 0,
+        "bottom": 0
+      },
+      "trackIndex": 1,
+      "name": "ambition-sverige-partibeteckning-transparent.svg",
+      "visualScale": 0.42719042141858143
+    }
+  ]
+}

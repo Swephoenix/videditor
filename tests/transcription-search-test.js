@@ -81,10 +81,14 @@ const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mill
 
   const videoClip = document.querySelector('.clip.video');
   videoClip.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, clientX: 50, clientY: 50 }));
-  if (!document.querySelector('#clip-context-menu').hidden) throw new Error('Videoklippet fick en transkriberingsmeny.');
+  if (document.querySelector('#clip-context-menu').hidden || document.querySelector('#separate-from-audio').hidden) {
+    throw new Error('Videoklippets högerklicksmeny saknar Separera från ljud.');
+  }
   const audioClip = document.querySelector('.clip.audio');
   audioClip.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, clientX: 50, clientY: 50 }));
-  if (document.querySelector('#clip-context-menu').hidden) throw new Error('Högerklicksmenyn öppnades inte.');
+  if (document.querySelector('#clip-context-menu').hidden || document.querySelector('#transcribe').hidden) {
+    throw new Error('Ljudklippets högerklicksmeny saknar Transkribera.');
+  }
   document.querySelector('#transcribe').click();
   await wait(100);
 

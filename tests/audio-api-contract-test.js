@@ -22,6 +22,11 @@ async function request(baseUrl, path, body) {
   try {
     const address = server.address();
     const baseUrl = `http://127.0.0.1:${address.port}`;
+    const chain = await fetch(`${baseUrl}/chain.svg`);
+    assert(chain.status === 200 && (chain.headers.get('content-type') || '').includes('image/svg+xml'), 'chain.svg serverades inte som SVG.');
+    assert((await chain.text()).includes('<svg'), 'chain.svg-svaret saknar SVG-innehåll.');
+    const favicon = await fetch(`${baseUrl}/favicon.ico`);
+    assert(favicon.status === 204, 'Favicon-routen gav ett konsolfel i stället för ett tomt svar.');
     const manifest = await request(baseUrl, '/api/audio/tools');
     assert(manifest.status === 200, 'Verktygsmanifestet kunde inte hämtas.');
     assert(manifest.body.tools?.length === 5, 'Manifestet beskriver inte fem AI-verktyg.');

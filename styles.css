@@ -130,6 +130,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .quick-tool:focus-visible { outline: 3px solid #8fc7ff; outline-offset: 2px; }
 .quick-tool:disabled { opacity: .45; cursor: not-allowed; }
 .quick-tool svg { width: 20px; height: 20px; color: #f5f7fa; display: block; }
+.chain-tool-icon { width: 20px; height: 20px; object-fit: contain; opacity: .8; }
 
 .editor-body {
   flex: 1;
@@ -696,7 +697,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .transcript-search-result:hover, .transcript-search-result.current { background: #34383f; }
 .transcript-result-time { color: #8fe6da; font-variant-numeric: tabular-nums; }
 .transcript-result-text { overflow: hidden; color: #eef0f3; text-overflow: ellipsis; white-space: nowrap; }
-.timeline-container { height: clamp(160px, 30vh, 380px); display: flex; flex: 0 0 auto; background: var(--panel); border-top: 1px solid var(--border); overflow: hidden; }
+.timeline-container { position: relative; height: clamp(160px, 30vh, 380px); display: flex; flex: 0 0 auto; background: var(--panel); border-top: 1px solid var(--border); overflow: hidden; }
 .track-labels { width: 130px; height: 100%; flex: 0 0 auto; overflow: hidden; background: #191b1f; border-right: 1px solid var(--border); z-index: 5; }
 .ruler-label { height: 36px; display: grid; place-items: center; color: #d8dbe0; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
 .track-label { height: 90px; display: flex; align-items: center; gap: 4px; padding-left: 17px; border-bottom: 1px solid var(--border); color: var(--muted); font-weight: 700; }
@@ -717,6 +718,15 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .transcription-eye.active:hover { color: #8cf5b3; }
 .timeline-scroll { height: 100%; flex: 1; min-width: 0; overflow: auto; scrollbar-gutter: stable; }
 .timeline-tracks { position: relative; width: 3600px; min-width: 100%; }
+.timeline-link-connectors { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
+.timeline-link-connector {
+  position: absolute;
+  width: 18px;
+  min-height: 20px;
+  object-fit: fill;
+  opacity: .58;
+  filter: drop-shadow(0 1px 2px rgb(0 0 0 / .5));
+}
 .timeline-selection-box {
   position: absolute;
   z-index: 10;
@@ -732,6 +742,31 @@ body.timeline-selecting * { cursor: crosshair !important; user-select: none !imp
 .track { position: relative; height: 90px; border-bottom: 1px solid var(--border); background-color: rgb(255 255 255 / .025); background-image: repeating-linear-gradient(90deg, transparent 0 199px, rgb(255 255 255 / .06) 200px); }
 .playhead { position: absolute; z-index: 4; top: 0; bottom: 0; left: 0; width: 2px; background: var(--primary); cursor: ew-resize; }
 .playhead::before { content: ""; position: absolute; top: 0; left: -7px; border: 8px solid transparent; border-top: 13px solid var(--primary); }
+.playhead-follow {
+  position: absolute;
+  z-index: 12;
+  top: 9px;
+  right: 12px;
+  width: 38px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--primary) 70%, white 30%);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--panel) 82%, var(--primary) 18%);
+  color: var(--primary);
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 3px 12px rgb(0 0 0 / .35);
+  animation: playhead-follow-pulse 1s ease-in-out infinite;
+}
+.playhead-follow:hover { background: color-mix(in srgb, var(--panel) 65%, var(--primary) 35%); }
+@keyframes playhead-follow-pulse {
+  0%, 100% { transform: translateX(0); }
+  50% { transform: translateX(5px); }
+}
 .clip {
   position: absolute;
   top: 13px;

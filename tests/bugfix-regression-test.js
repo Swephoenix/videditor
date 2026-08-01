@@ -10,7 +10,9 @@ const {
   validateCanvas,
   parseNoiseFloor,
   textAnimationExpressions,
-  buildAssSubtitle
+  buildAssSubtitle,
+  waveformPeaksFromPcm,
+  buildVisualSizeFilter
 } = require('../server');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -59,7 +61,9 @@ function makeWindow(confirmAnswers = [], customFetch = null) {
       state, setPlayhead, removeSelectedClip, undoEdit, loadProject,
       syncPlaybackMedia, createClipElement, selectClips, splitSelectedClip,
       applyTransition, removeSelectedTransition, applyVisualLayout,
-      startVisualScaleDrag, moveVisualScaleDrag, stopVisualScaleDrag
+      startVisualScaleDrag, moveVisualScaleDrag, stopVisualScaleDrag,
+      rebuildTrackLayout, editorHistory, updatePlayheadFollowIndicator, unlinkClipPair,
+      selectClips, toggleSelectedLink
     };
   `);
   return window;
@@ -70,6 +74,18 @@ function assert(condition, message) {
 }
 
 async function testServerContracts() {
+  const pcm = Buffer.alloc(16);
+  pcm.writeFloatLE(0.2, 0);
+  pcm.writeFloatLE(0.8, 4);
+  pcm.writeFloatLE(0.4, 8);
+  pcm.writeFloatLE(0.1, 12);
+  const waveform = waveformPeaksFromPcm(pcm, 2);
+  assert(waveform.length === 2 && waveform[0] > 0.79 && waveform[1] > 0.39, 'Waveformens server-sampling grupperade PCM-data fel.');
+
+  const videoFit = buildVisualSizeFilter({ kind: 'video', visualScale: 1 }, 1920, 1080);
+  assert(videoFit.includes('force_original_aspect_ratio=decrease'), 'Videoexporten bevarar inte längre källans bildförhållande.');
+  assert(videoFit.includes('pad=1920:1080') && !videoFit.includes('force_original_aspect_ratio=increase'), 'Videoexporten kan fortfarande tvångszooma och beskära bilden.');
+
   const points = [
     { x: 0.1, y: 0.1 }, { x: 0.4, y: 0.1 },
     { x: 0.4, y: 0.4 }, { x: 0.1, y: 0.4 }
@@ -139,6 +155,25 @@ async function testProjectCancel() {
   assert(projectInput.value === '', 'Projektfilens input återställdes inte efter Avbryt.');
 }
 
+async function testLegacyColorProject() {
+  const window = makeWindow();
+  const projectInput = window.document.querySelector('#project-input');
+  projectInput.files = [{
+    text: async () => JSON.stringify({
+      playhead: 1,
+      clips: [{
+        kind: 'color', name: 'Äldre färgblock', start: 0, trimStart: 0, trimEnd: 2,
+        mediaDuration: 100, trackIndex: 0
+      }]
+    })
+  }];
+  await window.__test.loadProject();
+  const color = window.__test.state.clips[0]?.color;
+  assert(color?.color === '#e50914', 'Ett äldre färgblock utan färgdata normaliserades inte.');
+  assert(color?.x === 0.5 && color?.y === 0.5, 'Färgblockets standardposition återställdes inte.');
+  assert(window.document.querySelector('.color-block'), 'Det återställda färgblocket renderades inte.');
+}
+
 async function testDelayedAutoSplitPersistence() {
   const delayedFetch = async (url, options = {}) => {
     if (url === '/api/status') return response({ ffmpeg: true, nvenc: false });
@@ -176,6 +211,33 @@ async function testDelayedAutoSplitPersistence() {
   assert(persisted.clips.length === 2, 'Det extraherade ljudklippet sparades inte.');
 }
 
+async function testVideoContextMenuSeparatesAudio() {
+  const delayedFetch = async (url, options = {}) => {
+    if (url.includes('/extract-audio') && options.method === 'POST') {
+      return response({ id: 'context-audio', name: 'video_ljud.m4a', kind: 'audio', hasAudio: true, duration: 6 });
+    }
+    return response({});
+  };
+  const window = makeWindow([], delayedFetch);
+  const video = {
+    id: 'context-video', name: 'Video', kind: 'video', mediaId: 'context-media', mediaDuration: 6,
+    start: 0, trimStart: 0, trimEnd: 6, trackIndex: 0
+  };
+  window.__test.state.clips = [video];
+  window.__test.createClipElement(video);
+  const videoElement = window.document.querySelector('.clip.video');
+  videoElement.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, clientX: 80, clientY: 80 }));
+  const menu = window.document.querySelector('#clip-context-menu');
+  const separate = window.document.querySelector('#separate-from-audio');
+  assert(!menu.hidden && !separate.hidden, 'Videoklippets högerklicksmeny saknar Separera från ljud.');
+  separate.click();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const audio = window.__test.state.clips.find((clip) => clip.kind === 'audio');
+  assert(audio, 'Högerklicksalternativet skapade inget ljudklipp.');
+  assert(!video.linkGroupId && !audio.linkGroupId, 'Ljudet separerades men förblev länkat till videon.');
+  assert(window.__test.state.selectedId === audio.id, 'Det separerade ljudklippet markerades inte.');
+}
+
 async function testMultiClipSplit() {
   const window = makeWindow();
   const clips = [
@@ -199,6 +261,7 @@ async function testMultiClipSplit() {
   ];
   window.__test.state.clips = clips;
   clips.forEach(window.__test.createClipElement);
+  assert(window.document.querySelectorAll('.timeline-link-connector').length === 1, 'Länkade video- och ljudklipp fick ingen kedjeikon.');
   window.__test.selectClips(clips.map((clip) => clip.id), 'video');
   window.__test.setPlayhead(2, false);
   window.__test.splitSelectedClip();
@@ -217,8 +280,11 @@ async function testMultiClipSplit() {
     rightLinked[0].linkGroupId !== leftVideo.linkGroupId,
     'De högra A/V-halvorna fick inte en egen gemensam länk.'
   );
+  assert(window.document.querySelectorAll('.timeline-link-connector').length === 2, 'Kedjeikonerna uppdaterades inte efter delning av länkade klipp.');
   assert(window.__test.state.selectedIds.size === 3, 'De nya högra halvorna förblev inte markerade.');
 
+  window.__test.unlinkClipPair(leftVideo, { recordHistory: false });
+  assert(window.document.querySelectorAll('.timeline-link-connector').length === 1, 'Kedjeikonen försvann inte när en länk separerades.');
   window.__test.undoEdit();
   assert(window.__test.state.clips.length === 4, 'Multidelningen gick inte att ångra i ett steg.');
 }
@@ -239,6 +305,75 @@ async function testSynchronizedMultiDrag() {
   window.document.dispatchEvent(new window.MouseEvent('mouseup', { bubbles: true }));
   assert(clips[0].start === 3 && clips[1].start === 4 && clips[2].start === 5, 'Multmarkeringen flyttades inte synkroniserat.');
   assert(window.__test.state.selectedIds.size === 3, 'Multmarkeringen försvann när ett markerat klipp drogs.');
+}
+
+async function testVerticalStackDrag() {
+  const window = makeWindow();
+  const clips = [
+    { id: 'top', name: 'Top', kind: 'video', mediaId: 'm1', mediaDuration: 10, start: 0, trimStart: 0, trimEnd: 5, trackIndex: 1 },
+    { id: 'bottom', name: 'Bottom', kind: 'video', mediaId: 'm2', mediaDuration: 10, start: 0, trimStart: 0, trimEnd: 5, trackIndex: 0 }
+  ];
+  window.__test.state.clips = clips;
+  clips.forEach(window.__test.createClipElement);
+  window.__test.selectClips(clips.map((clip) => clip.id), 'top');
+  window.__test.editorHistory.undo = [];
+  window.__test.editorHistory.redo = [];
+
+  const topElement = window.document.querySelector('.clip[data-id="top"]');
+  const topTrack = window.__test.state.visualTrackEls.at(-1);
+  topTrack.getBoundingClientRect = () => ({ left: 0, top: 50, right: 400, bottom: 140, width: 400, height: 90 });
+  topElement.dispatchEvent(new window.MouseEvent('mousedown', {
+    bubbles: true, button: 0, clientX: 100, clientY: 100
+  }));
+  window.document.querySelector('#ruler').dispatchEvent(new window.MouseEvent('mousemove', {
+    bubbles: true, clientX: 100, clientY: 0
+  }));
+  window.document.dispatchEvent(new window.MouseEvent('mouseup', { bubbles: true }));
+
+  const moved = new Map(window.__test.state.clips.map((clip) => [clip.id, clip]));
+  assert(moved.get('top').trackIndex > moved.get('bottom').trackIndex, 'Gruppdragningen vände klippens lagerordning.');
+  assert(window.__test.editorHistory.undo.length === 1, 'En ren vertikal dragning skapade ingen undo-post.');
+  assert(window.document.querySelectorAll('#visual-track').length === 1, 'Dragningen skapade dubbla visual-track-id:n.');
+
+  window.__test.rebuildTrackLayout();
+  window.__test.rebuildTrackLayout();
+  assert(window.document.querySelectorAll('.clip[data-id="top"]').length === 1, 'Ombyggnad duplicerade det översta klippet.');
+  assert(window.document.querySelectorAll('.clip[data-id="bottom"]').length === 1, 'Ombyggnad duplicerade det nedersta klippet.');
+
+  window.__test.undoEdit();
+  const restored = new Map(window.__test.state.clips.map((clip) => [clip.id, clip]));
+  assert(restored.get('top').trackIndex === 1 && restored.get('bottom').trackIndex === 0, 'Undo återställde inte spårordningen.');
+}
+
+async function testDoubleClickMovesPlayhead() {
+  const window = makeWindow();
+  const clips = [
+    { id: 'video-dbl', name: 'Video', kind: 'video', mediaId: 'm1', mediaDuration: 10, start: 1, trimStart: 0, trimEnd: 3, trackIndex: 0 },
+    { id: 'color-dbl', name: 'Färg', kind: 'color', mediaDuration: 100, start: 5, trimStart: 0, trimEnd: 2, trackIndex: 1, color: { color: '#ffffff', x: 0.5, y: 0.5, width: 1, height: 1 } },
+    { id: 'text-dbl', name: 'Text', kind: 'text', mediaDuration: 100, start: 8, trimStart: 0, trimEnd: 2, trackIndex: 2, text: { text: 'Text' } }
+  ];
+  window.__test.state.clips = clips;
+  clips.forEach(window.__test.createClipElement);
+  const timeline = window.document.querySelector('#timeline-tracks');
+  timeline.getBoundingClientRect = () => ({ left: 100, top: 0, right: 3700, bottom: 400, width: 3600, height: 400 });
+
+  const videoElement = window.document.querySelector('.clip[data-id="video-dbl"]');
+  videoElement.querySelector('span').dispatchEvent(new window.MouseEvent('mousedown', {
+    bubbles: true, button: 0, clientX: 180, clientY: 100
+  }));
+  window.document.dispatchEvent(new window.MouseEvent('mouseup', { bubbles: true, clientX: 180, clientY: 100 }));
+  assert(window.document.querySelector('.clip[data-id="video-dbl"]') === videoElement, 'Ett vanligt klick byggde om klippet och blockerade webbläsarens dblclick-event.');
+
+  for (const [id, expectedTime] of [['video-dbl', 2.25], ['color-dbl', 5.75], ['text-dbl', 9.5]]) {
+    const title = window.document.querySelector(`.clip[data-id="${id}"] span`);
+    title.dispatchEvent(new window.MouseEvent('dblclick', {
+      bubbles: true,
+      button: 0,
+      clientX: 100 + expectedTime * 40,
+      clientY: 100
+    }));
+    assert(Math.abs(window.__test.state.playhead - expectedTime) < 0.001, `Dubbelklick på ${id} flyttade inte playhead till klickpositionen.`);
+  }
 }
 
 async function testTransitions() {
@@ -308,18 +443,59 @@ async function testOverlappingAudioPreview() {
   assert(window.__test.state.timelineAudioPlayers.size === 2, 'Previewn skapade inte en spelare per överlappande ljudklipp.');
 }
 
+async function testPlayheadFollowIndicator() {
+  const window = makeWindow();
+  const scroll = window.document.querySelector('#timeline-scroll');
+  const follow = window.document.querySelector('#playhead-follow');
+  Object.defineProperty(scroll, 'clientWidth', { configurable: true, value: 400 });
+  Object.defineProperty(scroll, 'scrollWidth', { configurable: true, value: 2000 });
+  scroll.scrollLeft = 0;
+
+  window.__test.setPlayhead(20, false);
+  assert(!follow.hidden, 'Playhead-indikatorn visades inte när playheaden låg till höger utanför synfältet.');
+  follow.click();
+  assert(scroll.scrollLeft > 0, 'Klick på playhead-indikatorn scrollade inte tidslinjen.');
+  window.__test.updatePlayheadFollowIndicator();
+  assert(follow.hidden, 'Playhead-indikatorn försvann inte efter att playheaden blivit synlig.');
+}
+
+async function testToolbarLinkToggle() {
+  const window = makeWindow();
+  const clips = [
+    { id: 'video-link', name: 'Video', kind: 'video', mediaId: 'video', mediaDuration: 8, start: 0, trimStart: 0, trimEnd: 5, trackIndex: 0 },
+    { id: 'audio-link', name: 'Ljud', kind: 'audio', mediaId: 'audio', mediaDuration: 8, start: 0, trimStart: 0, trimEnd: 5, trackIndex: 0 }
+  ];
+  window.__test.state.clips = clips;
+  clips.forEach(window.__test.createClipElement);
+  window.__test.selectClips(clips.map((clip) => clip.id), clips[0].id);
+  const button = window.document.querySelector('#qt-link');
+  assert(!button.disabled && button.textContent.includes('Länka'), 'Länkverktyget aktiverades inte för ett valt video- och ljudklipp.');
+  button.click();
+  assert(clips[0].linkGroupId && clips[0].linkGroupId === clips[1].linkGroupId, 'Länkverktyget band inte ihop video och ljud.');
+  assert(button.textContent.includes('Separera'), 'Länkverktyget bytte inte till separera-läge.');
+  button.click();
+  assert(!clips[0].linkGroupId && !clips[1].linkGroupId, 'Länkverktyget separerade inte video och ljud.');
+}
+
 (async () => {
   await testServerContracts();
   await testDeleteUndo();
   await testProjectCancel();
+  await testLegacyColorProject();
   await testDelayedAutoSplitPersistence();
+  await testVideoContextMenuSeparatesAudio();
   await testMultiClipSplit();
   await testSynchronizedMultiDrag();
+  await testVerticalStackDrag();
+  await testDoubleClickMovesPlayhead();
   await testTransitions();
   await testCanvasFormatAndVisualScale();
   await testOverlappingAudioPreview();
+  await testPlayheadFollowIndicator();
+  await testToolbarLinkToggle();
   console.log('BUGFIX REGRESSIONS OK');
+  process.exit(0);
 })().catch((error) => {
   console.error(error.stack || error.message);
-  process.exitCode = 1;
+  process.exit(1);
 });

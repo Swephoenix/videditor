@@ -1,132 +1,16 @@
 {
   "clips": [
     {
-      "id": "efb14379-d621-4a87-8615-22fe68975557",
-      "mediaId": "5721ff92-d4a6-44db-8b3a-3c917e9cb430",
-      "name": "a_animate_this_video_a.mp4",
+      "id": "edc1dea6-f325-4074-a1de-57c441d27e0b",
+      "mediaId": "5c8c64fb-79a0-464f-8168-46e0c23be280",
+      "name": "voiceoptimizer-dubbelbehandlad2.mp4",
       "kind": "video",
-      "mediaDuration": 10.041667,
-      "sourceWidth": 1280,
-      "sourceHeight": 720,
+      "mediaDuration": 17.968333,
+      "sourceWidth": 360,
+      "sourceHeight": 640,
       "start": 0,
       "trimStart": 0,
-      "trimEnd": 4.900480000000003,
-      "crop": {
-        "left": 0,
-        "right": 0,
-        "top": 0,
-        "bottom": 0
-      },
-      "visualScale": 0.9982776933625321,
-      "trackIndex": 0,
-      "muted": true
-    },
-    {
-      "id": "027fae1c-52f8-4797-92b7-ad89c582c2b6",
-      "mediaId": "2524d556-2b5e-4c93-b126-e9748cdb1480",
-      "name": "a_animate_this_video_a_ljud.m4a",
-      "kind": "audio",
-      "mediaDuration": 5.061995,
-      "sourceWidth": 0,
-      "sourceHeight": 0,
-      "start": 0,
-      "trimStart": 0,
-      "trimEnd": 5.061995,
-      "crop": {
-        "left": 0,
-        "right": 0,
-        "top": 0,
-        "bottom": 0
-      },
-      "muted": false,
-      "trackIndex": 0
-    },
-    {
-      "id": "577fa2b3-42fc-462f-a52d-e86b4c0497c8",
-      "name": "Färgblock",
-      "kind": "color",
-      "mediaDuration": 14400,
-      "start": 5.04682,
-      "trimStart": 0,
-      "trimEnd": 2.57012429780536,
-      "color": {
-        "color": "#ffffff",
-        "x": 0.5,
-        "y": 0.5,
-        "width": 1,
-        "height": 1
-      },
-      "trackIndex": 1
-    },
-    {
-      "id": "8eb7a4b4-3a39-49a6-9609-486fe19f99e3",
-      "name": "Text",
-      "kind": "text",
-      "trackIndex": 2,
-      "mediaDuration": 14400,
-      "start": 5.082278112549253,
-      "trimStart": 0,
-      "trimEnd": 0.37133343459150236,
-      "text": {
-        "text": "Upp och hoppa!",
-        "presetId": null,
-        "variant": "standard",
-        "fontSize": 0.11,
-        "color": "#000000",
-        "background": "none",
-        "x": 0.5089392133492253,
-        "y": 0.4920739047717707,
-        "scaleX": 0.5599096497813406,
-        "animIn": {
-          "type": "scale",
-          "duration": 0.3
-        },
-        "animOut": {
-          "type": "scale",
-          "duration": 0.25
-        }
-      }
-    },
-    {
-      "id": "59b34c92-66f8-4708-bb39-06afe199174f",
-      "name": "Text (kopia)",
-      "kind": "text",
-      "trackIndex": 2,
-      "mediaDuration": 14400,
-      "start": 5.518410441087354,
-      "trimStart": 0,
-      "trimEnd": 0.9060769073719459,
-      "text": {
-        "text": "Soffliggare!",
-        "presetId": "slide",
-        "variant": "standard",
-        "fontSize": 0.07,
-        "color": "#000000",
-        "background": "none",
-        "x": 0.5,
-        "y": 0.5,
-        "scaleX": 1,
-        "animIn": {
-          "type": "slide-left",
-          "duration": 0.5
-        },
-        "animOut": {
-          "type": "fade",
-          "duration": 0.3
-        }
-      }
-    },
-    {
-      "id": "c1e89167-b12a-4611-8e59-16a6d6c9e284",
-      "mediaId": "8bd4f085-faef-488f-b852-978354c35b77",
-      "name": "ambition-sverige-partibeteckning-transparent.svg",
-      "kind": "image",
-      "mediaDuration": 14400,
-      "sourceWidth": 1200,
-      "sourceHeight": 461,
-      "start": 6.470858715137906,
-      "trimStart": 0.04708875498029935,
-      "trimEnd": 1.184619344288154,
+      "trimEnd": 17.968333,
       "crop": {
         "left": 0,
         "right": 0,
@@ -134,11 +18,34 @@
         "bottom": 0
       },
       "visualScale": 1,
-      "trackIndex": 2
+      "trackIndex": 0,
+      "muted": true,
+      "linkGroupId": "8421abd8-8a6d-4ba5-85e3-e26e9455dc59"
+    },
+    {
+      "id": "efc5786c-4034-429b-b6c7-6f4ea08d6893",
+      "mediaId": "d1f751dd-ebd5-4686-b48f-74857b159cf2",
+      "name": "voiceoptimizer-dubbelbehandlad2_ljud.m4a",
+      "kind": "audio",
+      "mediaDuration": 17.951,
+      "sourceWidth": 0,
+      "sourceHeight": 0,
+      "start": 0,
+      "trimStart": 0,
+      "trimEnd": 17.951,
+      "crop": {
+        "left": 0,
+        "right": 0,
+        "top": 0,
+        "bottom": 0
+      },
+      "muted": false,
+      "trackIndex": 0,
+      "linkGroupId": "8421abd8-8a6d-4ba5-85e3-e26e9455dc59"
     }
   ],
   "selectedId": null,
-  "playhead": 1.15,
+  "playhead": 1.7282400000000016,
   "canvas": {
     "width": 1280,
     "height": 720

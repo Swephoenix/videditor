@@ -64,4 +64,24 @@ assert.deepStrictEqual(
   'Överlappande klipp får unika trackIndex.'
 );
 
+const lifted = compactTrackAssignments([
+  clip('video', 0, 4, 0, 'top'),
+  clip('video', 0, 4, 0, 'bottom')
+], ['bottom', 'top']);
+assert.deepStrictEqual(
+  lifted.map((item) => [item.id, item.trackIndex]),
+  [['top', 1], ['bottom', 0]],
+  'Flera lyfta klipp ska behålla lagerordningen som anges från botten till toppen.'
+);
+
+const denseTracks = compactTrackAssignments([
+  clip('video', 0, 4, 2, 'gap-bottom'),
+  clip('video', 0, 4, 5, 'gap-top')
+]);
+assert.deepStrictEqual(
+  denseTracks.map((item) => [item.id, item.trackIndex]),
+  [['gap-bottom', 0], ['gap-top', 1]],
+  'Tomma spår ska kompakteras utan att basspåret byts ut.'
+);
+
 console.log('TIMELINE TRACK MODEL OK');

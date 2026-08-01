@@ -110,6 +110,7 @@ setTimeout(() => {
             console.log('  muted video clips:', mutedUndo.length, '(expect 2)');
             if (audioClipsUndo.length !== 2 || visualTracksUndo.length !== 1 || mutedUndo.length !== 2) throw new Error('Undo återställde inte den kompakterade spårmodellen.');
              console.log('DONE');
+             process.exit(0);
           }, 200);
          }, 200);
       }, 200);

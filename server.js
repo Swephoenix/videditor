@@ -32,6 +32,8 @@ const UPLOAD_DIR = path.join(ROOT, 'uploads');
 const EXPORT_DIR = path.join(ROOT, 'exports');
 const LIBRARY_FILE = path.join(ROOT, 'library.json');
 const AUDIO_ANALYSIS_FILE = path.join(ROOT, 'audio-analyses.json');
+const REALESRGAN_SCRIPT = path.join(ROOT, 'upscale_realesrgan.py');
+const REALESRGAN_MODEL = path.join(ROOT, 'models', 'RealESRGAN_x4plus.pth');
 const PORT = Number(process.env.PORT) || 3000;
 const LOCAL_MODEL_API = process.env.LOCAL_MODEL_API || 'http://127.0.0.1:8092';
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024;
@@ -153,7 +155,12 @@ async function withAudioTask(callback) {
 }
 
 function requireAudioMedia(id) {
-  const item = mediaLibrary.get(id);
+  let item = mediaLibrary.get(id);
+  if (!item) {
+    const refreshedLibrary = loadLibrary();
+    item = refreshedLibrary.get(id);
+    if (item) mediaLibrary = refreshedLibrary;
+  }
   if (!item) {
     const error = new Error('Mediefilen finns inte.');
     error.status = 404;
@@ -337,6 +344,34 @@ function runProcess(command, args, options = {}) {
       else reject(new Error(`${command} avslutades med kod ${code}: ${stderr.slice(-2000)}`));
     });
   });
+}
+
+function runProcessBuffer(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], ...options });
+    const stdout = [];
+    let stderr = '';
+    child.stdout.on('data', (chunk) => stdout.push(chunk));
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) resolve({ buffer: Buffer.concat(stdout), stderr });
+      else reject(new Error(`${command} avslutades med kod ${code}: ${stderr.slice(-2000)}`));
+    });
+  });
+}
+
+function waveformPeaksFromPcm(buffer, width) {
+  const sampleCount = Math.floor(buffer.length / 4);
+  const peaks = new Float32Array(Math.max(1, width));
+  if (!sampleCount) return peaks;
+  const samplesPerPeak = Math.max(1, sampleCount / peaks.length);
+  for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
+    const peakIndex = Math.min(peaks.length - 1, Math.floor(sampleIndex / samplesPerPeak));
+    const amplitude = Math.abs(buffer.readFloatLE(sampleIndex * 4));
+    if (amplitude > peaks[peakIndex]) peaks[peakIndex] = amplitude;
+  }
+  return peaks;
 }
 
 function probeSvg(filePath) {
@@ -548,6 +583,34 @@ app.get('/api/media/:id/file', (request, response) => {
   if (!item) return response.status(404).json({ error: 'Mediefilen finns inte.' });
   response.setHeader('Cache-Control', 'private, max-age=3600');
   response.sendFile(path.join(UPLOAD_DIR, item.storedName));
+});
+
+app.get('/api/media/:id/waveform', async (request, response, next) => {
+  try {
+    const { item, filePath } = requireAudioMedia(request.params.id);
+    const width = Math.round(clamp(Number(request.query.width) || 400, 32, 2000));
+    const start = clamp(Number(request.query.start) || 0, 0, item.duration || MAX_DURATION);
+    const requestedEnd = Number(request.query.end);
+    const end = clamp(Number.isFinite(requestedEnd) ? requestedEnd : (item.duration || MAX_DURATION), start, item.duration || MAX_DURATION);
+    const duration = end - start;
+    if (duration <= 0) throw badRequest('Waveformens intervall är tomt.');
+    const sampleRate = 2000;
+    const result = await withAudioTask(() => runProcessBuffer('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error',
+      '-ss', String(start), '-i', filePath, '-t', String(duration),
+      '-vn', '-ac', '1', '-ar', String(sampleRate), '-f', 'f32le', 'pipe:1'
+    ], { timeout: AUDIO_TASK_TIMEOUT_MS, killSignal: 'SIGKILL' }));
+    const peaks = waveformPeaksFromPcm(result.buffer, width);
+    const maxPeak = peaks.reduce((max, peak) => Math.max(max, peak), 0) || 1;
+    response.json({
+      peaks: Array.from(peaks, (peak) => Math.min(1, peak / maxPeak)),
+      duration,
+      sampleRate
+    });
+  } catch (error) {
+    if (!error.status) error.status = 400;
+    next(error);
+  }
 });
 
 app.post('/api/media/:id/transcribe', async (request, response, next) => {
@@ -1509,15 +1572,49 @@ function findUpscaler() {
 }
 
 function runUpscale(job, inputPath, outputPath) {
-  const bin = findUpscaler();
-  if (!bin) {
-    throw new Error('video-upscale hittades inte. Bygg nvidia-upscaler-custom (cmake --build build) eller lägg binären i nvidia-upscaler-custom/.');
+  const pythonCandidates = [
+    process.env.REALESRGAN_PYTHON,
+    path.join(ROOT, '.venv', 'bin', 'python'),
+    path.join(ROOT, '..', 'venv', 'bin', 'python')
+  ].filter(Boolean);
+  const python = pythonCandidates.find((candidate) => fs.existsSync(candidate));
+  let command;
+  let args;
+  if (python && fs.existsSync(REALESRGAN_SCRIPT) && fs.existsSync(REALESRGAN_MODEL)) {
+    command = python;
+    args = [
+      REALESRGAN_SCRIPT, inputPath, outputPath,
+      '--model', REALESRGAN_MODEL,
+      '--tile', '256',
+      '--encoder', 'h264_nvenc',
+      '--require-cuda'
+    ];
+  } else {
+    const bin = findUpscaler();
+    if (!bin) {
+      throw new Error('Ingen riktig AI-upscaler hittades. Installera Real-ESRGAN-miljön eller NVIDIA Maxine VFX SDK.');
+    }
+    command = bin;
+    args = [
+      inputPath, outputPath,
+      '--engine', 'maxine-upscale',
+      '--codec', 'h264',
+      '--preset', 'p7',
+      '--quality', '12'
+    ];
   }
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, [inputPath, outputPath, '--codec', 'h264'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     job.encodePid = child.pid;
     let stderr = '';
-    child.stdout.on('data', () => {});
+    let stdout = '';
+    child.stdout.on('data', (chunk) => {
+      stdout = (stdout + chunk.toString()).slice(-4000);
+      for (const match of stdout.matchAll(/PROGRESS\s+(\d+)/g)) {
+        job.progress = Math.min(99, Number(match[1]));
+        updateEta(job);
+      }
+    });
     child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString()).slice(-8000); });
     child.on('error', (error) => reject(error));
     child.on('close', (code) => {
@@ -1525,6 +1622,19 @@ function runUpscale(job, inputPath, outputPath) {
       else resolve();
     });
   });
+}
+
+function buildVisualSizeFilter(clip, width, height) {
+  const visualScale = Number.isFinite(clip.visualScale) ? clip.visualScale : 1;
+  if (visualScale !== 1) {
+    return `scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
+      `scale=w='trunc(iw*${visualScale.toFixed(6)}/2)*2':` +
+      `h='trunc(ih*${visualScale.toFixed(6)}/2)*2',` +
+      `crop=w='min(iw,${width})':h='min(ih,${height})',` +
+      `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black@0,`;
+  }
+  return `scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
+    `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black@0,`;
 }
 
 const WHISPER_VENV = path.join(ROOT, '..', 'whisper', '.venv');
@@ -1859,17 +1969,7 @@ async function renderProject(jobId, project) {
         ? `crop=iw*${cropWidth.toFixed(6)}:ih*${cropHeight.toFixed(6)}:` +
           `iw*${clip.crop.left.toFixed(6)}:ih*${clip.crop.top.toFixed(6)},`
         : '';
-      const visualScale = Number.isFinite(clip.visualScale) ? clip.visualScale : 1;
-      const sizeFilter = visualScale !== 1
-        ? `scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
-          `scale=w='trunc(iw*${visualScale.toFixed(6)}/2)*2':` +
-          `h='trunc(ih*${visualScale.toFixed(6)}/2)*2',` +
-          `crop=w='min(iw,${width})':h='min(ih,${height})',` +
-          `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black@0,`
-        : clip.kind === 'image'
-          ? `scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
-            `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black@0,`
-          : `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},`;
+      const sizeFilter = buildVisualSizeFilter(clip, width, height);
       let animPost = '';
       if (clip.animIn?.type === 'fade') {
         animPost = `format=rgba,fade=t=in:st=${clip.start.toFixed(3)}:` +
@@ -2070,7 +2170,7 @@ async function renderProject(jobId, project) {
 
   const CRF_MAP = [null, 28, 24, 20, 15, 0];
   const CQ_MAP = [null, 34, 27, 20, 13, 1];
-  const q = project.quality != null ? project.quality : 5;
+  const q = project.upscale ? 5 : (project.quality != null ? project.quality : 5);
   const crf = CRF_MAP[q] ?? 20;
   const cq = CQ_MAP[q] ?? 20;
   const lossless = crf === 0;
@@ -2138,7 +2238,7 @@ async function renderProject(jobId, project) {
       phase: 'upscale',
       phaseStartedAt: new Date().toISOString(),
       progress: 0,
-      encoder: 'AI upscaling (video-upscale)'
+      encoder: 'AI super-resolution 2× (Real-ESRGAN/Maxine)'
     });
     try {
       await runUpscale(job, renderedPath, upscaledPath);
@@ -2162,6 +2262,8 @@ app.get('/', (_request, response) => response.sendFile(path.join(ROOT, 'index.ht
 app.get('/styles.css', (_request, response) => response.sendFile(path.join(ROOT, 'styles.css'), noCache));
 app.get('/timeline-model.js', (_request, response) => response.sendFile(path.join(ROOT, 'timeline-model.js'), noCache));
 app.get('/app.js', (_request, response) => response.sendFile(path.join(ROOT, 'app.js'), noCache));
+app.get('/chain.svg', (_request, response) => response.type('image/svg+xml').sendFile(path.join(ROOT, 'chain.svg'), noCache));
+app.get('/favicon.ico', (_request, response) => response.status(204).end());
 
 app.use((error, _request, response, _next) => {
   const status = Number.isInteger(error.status) && error.status >= 400 && error.status < 500
@@ -2212,5 +2314,7 @@ module.exports = {
   renderProject,
   renderHtmlBlockFrames,
   renderHtmlClipToMedia,
+  waveformPeaksFromPcm,
+  buildVisualSizeFilter,
   jobs
 };

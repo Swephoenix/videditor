@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="dark">
   <title>NVIDIA Video Editor</title>
-  <link rel="stylesheet" href="/styles.css?v=0.14.0">
+  <link rel="stylesheet" href="/styles.css?v=0.15.2">
 </head>
 <body>
   <header class="toolbar">
@@ -66,7 +66,7 @@
           <span class="quality-range-label">1 (låg) – 5 (lossless)</span>
         </label>
         <label class="hardware menu-item"><input id="use-nvidia" type="checkbox" checked> NVIDIA NVENC</label>
-        <label class="hardware menu-item"><input id="use-upscale" type="checkbox"> AI upscaling</label>
+        <label class="hardware menu-item"><input id="use-upscale" type="checkbox"> AI super-resolution 2×</label>
         <button class="export" id="export">Exportera MP4</button>
         <button id="export-mp3">Exportera ljud som MP3</button>
         <button id="export-wav">Exportera ljud som WAV</button>
@@ -323,6 +323,10 @@
       <span class="transition-tool-icon" aria-hidden="true">◇</span>
       <span>Övergång</span>
     </button>
+    <button class="quick-tool" id="qt-link" title="Länka markerat video- och ljudklipp" disabled>
+      <img class="chain-tool-icon" src="/chain.svg?v=0.15.2" alt="" aria-hidden="true">
+      <span>Länka</span>
+    </button>
   </div>
 </div>
 </div>
@@ -401,12 +405,15 @@
         <div class="track visual-track" id="visual-track"></div>
         <div class="track" id="transcription-track"></div>
         <div class="track audio-track" id="audio-track"></div>
+        <div id="timeline-link-connectors" class="timeline-link-connectors" aria-hidden="true"></div>
       </div>
     </div>
+    <button id="playhead-follow" class="playhead-follow" type="button" hidden aria-label="Visa playheaden" title="Visa playheaden">➜</button>
   </section>
 
   <div id="clip-context-menu" class="context-menu" role="menu" hidden>
     <button id="transcribe" type="button" role="menuitem">Transkribera</button>
+    <button id="separate-from-audio" type="button" role="menuitem" hidden>Separera från ljud</button>
   </div>
 
   <div id="ai-editing-modal" class="modal ai-modal" role="dialog" aria-modal="true" aria-labelledby="ai-editing-title" hidden>
@@ -486,7 +493,7 @@
     </div>
   </div>
 
-  <script src="/timeline-model.js?v=0.14.2" defer></script>
-  <script src="/app.js?v=0.14.2" defer></script>
+  <script src="/timeline-model.js?v=0.15.2" defer></script>
+  <script src="/app.js?v=0.15.2" defer></script>
 </body>
 </html>
