@@ -51,7 +51,8 @@
     ) || null;
   }
 
-  function compactTrackAssignments(clips) {
+  function compactTrackAssignments(clips, liftedIds = []) {
+    const lifted = new Set(Array.isArray(liftedIds) ? liftedIds : (liftedIds ? [liftedIds] : []));
     const result = (clips || []).map((clip) => ({ ...clip }));
     const visual = result.filter((clip) => VISUAL.has(clip.kind));
     for (let pass = 0; pass < 20; pass += 1) {
@@ -60,7 +61,9 @@
         for (let kj = ki + 1; kj < visual.length; kj += 1) {
           const a = visual[ki], b = visual[kj];
           if (a.id !== b.id && (a.trackIndex || 0) === (b.trackIndex || 0) && overlaps(a.start, clipEnd(a), b.start, clipEnd(b))) {
-            b.trackIndex = (b.trackIndex || 0) + 1;
+            let mover = b;
+            if (lifted.has(a.id) && !lifted.has(b.id)) mover = a;
+            mover.trackIndex = (mover.trackIndex || 0) + 1;
             anyConflict = true;
           }
         }

@@ -1672,10 +1672,10 @@ function ensureAudioTrack(index) {
   return state.audioTrackEls[index];
 }
 
-function rebuildTrackLayout(liftedId) {
+function rebuildTrackLayout(liftedIds) {
   const selectedId = state.selectedId;
   const selectedIds = new Set(state.selectedIds);
-  state.clips = timelineModel.compactTrackAssignments(state.clips, liftedId);
+  state.clips = timelineModel.compactTrackAssignments(state.clips, liftedIds || []);
   clearDynamicTracks();
   elements.visualTrack.replaceChildren();
   elements.transcriptionTrack.replaceChildren();
@@ -4047,8 +4047,9 @@ document.addEventListener('mouseup', () => {
   }
   const changedClip = state.action?.clip;
   const changedClips = state.action?.movingClips?.map((item) => item.clip) || (changedClip ? [changedClip] : []);
+  const movedIds = state.action?.movingClips?.map((item) => item.clip.id) || (changedClip ? [changedClip.id] : []);
   state.action = null;
-  if (changedClip) rebuildTrackLayout(changedClip.id);
+  if (changedClip) rebuildTrackLayout(movedIds);
   if (changedClips.some((clip) => clip.mediaId === state.transcriptionMediaId)) renderTranscription();
 });
 
