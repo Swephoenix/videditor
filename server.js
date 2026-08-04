@@ -33,7 +33,8 @@ const EXPORT_DIR = path.join(ROOT, 'exports');
 const LIBRARY_FILE = path.join(ROOT, 'library.json');
 const AUDIO_ANALYSIS_FILE = path.join(ROOT, 'audio-analyses.json');
 const REALESRGAN_SCRIPT = path.join(ROOT, 'upscale_realesrgan.py');
-const REALESRGAN_MODEL = path.join(ROOT, 'models', 'RealESRGAN_x4plus.pth');
+const REALESRGAN_FAST_MODEL = path.join(ROOT, 'models', 'realesr-general-x4v3.pth');
+const REALESRGAN_QUALITY_MODEL = path.join(ROOT, 'models', 'RealESRGAN_x4plus.pth');
 const PORT = Number(process.env.PORT) || 3000;
 const LOCAL_MODEL_API = process.env.LOCAL_MODEL_API || 'http://127.0.0.1:8092';
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024;
@@ -1580,12 +1581,15 @@ function runUpscale(job, inputPath, outputPath) {
   const python = pythonCandidates.find((candidate) => fs.existsSync(candidate));
   let command;
   let args;
-  if (python && fs.existsSync(REALESRGAN_SCRIPT) && fs.existsSync(REALESRGAN_MODEL)) {
+  const realesrganModel = fs.existsSync(REALESRGAN_FAST_MODEL)
+    ? REALESRGAN_FAST_MODEL
+    : REALESRGAN_QUALITY_MODEL;
+  if (python && fs.existsSync(REALESRGAN_SCRIPT) && fs.existsSync(realesrganModel)) {
     command = python;
     args = [
       REALESRGAN_SCRIPT, inputPath, outputPath,
-      '--model', REALESRGAN_MODEL,
-      '--tile', '256',
+      '--model', realesrganModel,
+      '--tile', '512',
       '--encoder', 'h264_nvenc',
       '--require-cuda'
     ];
@@ -2238,7 +2242,7 @@ async function renderProject(jobId, project) {
       phase: 'upscale',
       phaseStartedAt: new Date().toISOString(),
       progress: 0,
-      encoder: 'AI super-resolution 2× (Real-ESRGAN/Maxine)'
+      encoder: 'Snabb AI super-resolution 2× (Real-ESRGAN/Maxine)'
     });
     try {
       await runUpscale(job, renderedPath, upscaledPath);

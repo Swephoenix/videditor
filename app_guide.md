@@ -2,12 +2,12 @@
 
 Lokal webbaserad videoredigerare med flerspårstidslinje, transkribering och FFmpeg/NVENC-export.
 
-Aktuell appversion: 0.15.2.
+Aktuell appversion: 0.15.3.
 
 Dubbelklicka på ett tidslinjeklipp för att flytta playhead till den exakta klickpositionen.
 Högerklicka på ett videoklipp och välj "Separera från ljud" för att skapa och låsa upp ett separat ljudklipp.
 Waveforms beräknas server-side som amplitudpunkter för att långa ljud inte ska blockera preview-uppspelningen.
-"AI super-resolution 2×" använder den lokala `models/RealESRGAN_x4plus.pth` via PyTorch/CUDA. Om den miljön saknas används NVIDIA Maxine i `maxine-upscale`-läge; vanlig bilinjär CUDA-skalning räknas inte som AI. Videons bildförhållande bevaras vid export och tom yta fylls i stället för att kanterna tvångsbeskärs.
+"Snabb AI super-resolution 2×" använder normalt den kompakta `models/realesr-general-x4v3.pth` via PyTorch/CUDA. Den äldre kvalitetsmodellen `RealESRGAN_x4plus.pth` används som reserv om snabbmodellen saknas. Snabbläget prioriterar ungefär tio gånger högre genomströmning framför maximal detaljåterskapning. Om Python-miljön saknas används NVIDIA Maxine i `maxine-upscale`-läge. Videons bildförhållande bevaras vid export.
 
 ## Körning
 

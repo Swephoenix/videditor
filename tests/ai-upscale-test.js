@@ -8,7 +8,7 @@ const { execFileSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const SCRIPT = path.join(ROOT, 'upscale_realesrgan.py');
-const MODEL = path.join(ROOT, 'models', 'RealESRGAN_x4plus.pth');
+const MODEL = path.join(ROOT, 'models', 'realesr-general-x4v3.pth');
 const PYTHON_CANDIDATES = [
   process.env.REALESRGAN_PYTHON,
   path.join(ROOT, '.venv', 'bin', 'python'),
@@ -22,7 +22,7 @@ function assert(condition, message) {
 (async () => {
   const python = PYTHON_CANDIDATES.find((candidate) => fs.existsSync(candidate));
   assert(python, 'Ingen Python-miljö för Real-ESRGAN hittades.');
-  assert(fs.existsSync(MODEL), 'RealESRGAN_x4plus.pth saknas.');
+  assert(fs.existsSync(MODEL), 'realesr-general-x4v3.pth saknas.');
   const temporaryDirectory = await fsp.mkdtemp(path.join(os.tmpdir(), 'videditor-ai-upscale-'));
   const input = path.join(temporaryDirectory, 'input.mp4');
   const output = path.join(temporaryDirectory, 'output.mp4');
@@ -36,7 +36,7 @@ function assert(condition, message) {
     const modelCheck = execFileSync(python, [
       SCRIPT, '--model', MODEL, '--check-model', '--tile', '32'
     ], { encoding: 'utf8' });
-    assert(modelCheck.includes('MODEL_OK'), 'Real-ESRGAN-vikterna matchar inte modellarkitekturen.');
+    assert(modelCheck.includes('architecture=RealEsrganCompactX4'), 'Den kompakta modellarkitekturen laddades inte.');
     execFileSync(python, [
       SCRIPT, input, output, '--model', MODEL, '--tile', '32', '--encoder', 'libx264'
     ], { stdio: 'inherit' });

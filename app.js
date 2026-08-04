@@ -1863,7 +1863,7 @@ function renderTimelineLinkConnectors() {
       : Math.max(video.start, audio.start);
     const connector = document.createElement('img');
     connector.className = 'timeline-link-connector';
-    connector.src = '/chain.svg?v=0.15.2';
+    connector.src = '/chain.svg?v=0.15.3';
     connector.alt = '';
     if (hasLayoutRects) {
       const topEdge = videoRect.bottom <= audioRect.top ? videoRect.bottom : audioRect.bottom;
@@ -4447,7 +4447,7 @@ async function pollJob(id) {
       return;
     }
     if (job.status === 'upscaling') {
-      elements.exportMessage.textContent = `AI super-resolution 2× · ${job.progress || 0} %${eta ? ` · ${eta}` : ''}`;
+      elements.exportMessage.textContent = `Snabb AI super-resolution 2× · ${job.progress || 0} %${eta ? ` · ${eta}` : ''}`;
     }
     elements.cancelExport.hidden = false;
     elements.cancelExport.disabled = false;

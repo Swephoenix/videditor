@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""2x video super-resolution with the local RealESRGAN_x4plus model."""
+"""2x video super-resolution with compact or high-quality Real-ESRGAN models."""
 
 from __future__ import annotations
 
@@ -70,12 +70,32 @@ class RealEsrganX4(nn.Module):
         return self.conv_last(self.activation(self.conv_hr(body)))
 
 
+class RealEsrganCompactX4(nn.Module):
+    """The small realesr-general-x4v3 network used by official Real-ESRGAN."""
+
+    def __init__(self, features: int = 64, convolutions: int = 32) -> None:
+        super().__init__()
+        layers: list[nn.Module] = [nn.Conv2d(3, features, 3, 1, 1), nn.PReLU(num_parameters=features)]
+        for _ in range(convolutions):
+            layers.extend([nn.Conv2d(features, features, 3, 1, 1), nn.PReLU(num_parameters=features)])
+        layers.append(nn.Conv2d(features, 3 * 4 * 4, 3, 1, 1))
+        self.body = nn.Sequential(*layers)
+        self.upsampler = nn.PixelShuffle(4)
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        enhanced = self.upsampler(self.body(value))
+        base = functional.interpolate(value, scale_factor=4, mode="nearest")
+        return enhanced + base
+
+
 def load_model(model_path: Path, device: torch.device) -> nn.Module:
     checkpoint = torch.load(model_path, map_location="cpu", weights_only=True)
-    parameters = checkpoint.get("params_ema") if isinstance(checkpoint, dict) else None
+    parameters = None
+    if isinstance(checkpoint, dict):
+        parameters = checkpoint.get("params_ema") or checkpoint.get("params")
     if not isinstance(parameters, dict):
-        raise RuntimeError("Real-ESRGAN-modellen saknar params_ema.")
-    model = RealEsrganX4()
+        raise RuntimeError("Real-ESRGAN-modellen saknar params eller params_ema.")
+    model = RealEsrganCompactX4() if "body.0.weight" in parameters else RealEsrganX4()
     model.load_state_dict(parameters, strict=True)
     model.eval().to(device)
     if device.type == "cuda":
@@ -146,8 +166,8 @@ def encoder_command(
     ]
     if encoder == "h264_nvenc":
         command.extend([
-            "-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq",
-            "-rc", "vbr", "-cq", "12", "-b:v", "0",
+            "-c:v", "h264_nvenc", "-preset", "p3", "-tune", "hq",
+            "-rc", "vbr", "-cq", "16", "-b:v", "0",
         ])
     else:
         command.extend(["-c:v", "libx264", "-preset", "slow", "-crf", "12"])
@@ -164,7 +184,7 @@ def process_video(arguments: argparse.Namespace) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = load_model(arguments.model, device)
     if arguments.check_model:
-        print(f"MODEL_OK device={device.type}", flush=True)
+        print(f"MODEL_OK architecture={model.__class__.__name__} device={device.type}", flush=True)
         return
 
     capture = cv2.VideoCapture(str(arguments.input))
