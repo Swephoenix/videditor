@@ -9,7 +9,6 @@ PIDFILE="$ROOT/.server.pid"
 LOGFILE="$ROOT/.server.log"
 
 start() {
-  # Stoppa en äldre instans innan den nya servern körs i förgrunden.
   local old_pid=""
   if [[ -f "$PIDFILE" ]]; then
     old_pid="$(cat "$PIDFILE")"
@@ -20,7 +19,7 @@ start() {
     fi
     rm -f "$PIDFILE"
   fi
-  # Kill any stale node server on the same port (avoid killing Firefox etc.)
+
   local pids
   pids="$(lsof -ti ":$PORT" -sTCP:LISTEN 2>/dev/null || true)"
   for pid in $pids; do
@@ -72,7 +71,7 @@ stop() {
     rm -f "$PIDFILE"
     echo "Servern stoppad."
   else
-    echo "Ingen servern körs."
+    echo "Ingen server körs."
   fi
 }
 
@@ -84,10 +83,11 @@ status() {
   fi
 }
 
-case "${1:-start}" in
-  start) start ;;
+case "${1:-}" in
+  "") start ;;
+  server) start ;;
   stop) stop ;;
   restart) stop; sleep 1; start ;;
   status) status ;;
-  *) echo "Användning: $0 [start|stop|restart|status]"; exit 1 ;;
+  *) echo "Användning: $0 [server|stop|restart|status]"; exit 1 ;;
 esac

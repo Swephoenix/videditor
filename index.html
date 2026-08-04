@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="dark">
   <title>NVIDIA Video Editor</title>
-  <link rel="stylesheet" href="/styles.css?v=0.15.3">
+  <link rel="stylesheet" href="/styles.css?v=0.15.4">
 </head>
 <body>
   <header class="toolbar">
@@ -96,7 +96,7 @@
     <div class="editor-main">
       <main class="preview-area">
         <div class="preview-window">
-          <video id="preview" preload="metadata"></video>
+          <video id="preview" preload="auto"></video>
           <img id="image-preview" alt="Förhandsvisning av bild" hidden>
           <audio id="timeline-audio" preload="metadata" hidden></audio>
           <div id="blur-layer" class="blur-layer" aria-hidden="true"></div>
@@ -324,7 +324,7 @@
       <span>Övergång</span>
     </button>
     <button class="quick-tool" id="qt-link" title="Länka markerat video- och ljudklipp" disabled>
-      <img class="chain-tool-icon" src="/chain.svg?v=0.15.3" alt="" aria-hidden="true">
+      <img class="chain-tool-icon" src="/chain.svg?v=0.15.4" alt="" aria-hidden="true">
       <span>Länka</span>
     </button>
   </div>
@@ -493,7 +493,7 @@
     </div>
   </div>
 
-  <script src="/timeline-model.js?v=0.15.3" defer></script>
-  <script src="/app.js?v=0.15.3" defer></script>
+  <script src="/timeline-model.js?v=0.15.4" defer></script>
+  <script src="/app.js?v=0.15.4" defer></script>
 </body>
 </html>

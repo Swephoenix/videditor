@@ -896,7 +896,10 @@ async function initialize() {
   if (!saved) {
     try {
       const remote = await api('/api/project/autoload');
-      if (remote?.clips?.length) restoreEditor(remote);
+      if (remote?.clips?.length) {
+        restoreEditor(remote);
+        warmPreview();
+      }
     } catch { /* no remote save */ }
   }
   try {
@@ -3664,6 +3667,12 @@ function refreshPreviewLayout() {
   applyVisualLayout(clip, clip.kind === 'video' ? elements.preview : elements.imagePreview);
 }
 
+function warmPreview() {
+  const clip = state.clips.find((item) => item.kind === 'video' && item.mediaId);
+  if (!clip) return;
+  showPreview(clip, 0);
+}
+
 function showPreview(clip, sourceTime) {
   const url = `/api/media/${encodeURIComponent(clip.mediaId)}/file`;
   if (elements.preview.dataset.mediaId !== clip.mediaId) {
@@ -4554,6 +4563,7 @@ async function loadProject() {
     selectClip(null);
     setPlayhead(data.playhead || 0);
     updateTimelineWidth();
+    warmPreview();
     updatePreviewWindowSize();
     recordHistory();
   } catch (error) {
