@@ -1866,7 +1866,7 @@ function renderTimelineLinkConnectors() {
       : Math.max(video.start, audio.start);
     const connector = document.createElement('img');
     connector.className = 'timeline-link-connector';
-    connector.src = '/chain.svg?v=0.15.3';
+    connector.src = '/chain.svg?v=0.15.5';
     connector.alt = '';
     if (hasLayoutRects) {
       const topEdge = videoRect.bottom <= audioRect.top ? videoRect.bottom : audioRect.bottom;
@@ -4558,8 +4558,9 @@ async function loadProject() {
     elements.visualTrack.replaceChildren();
     elements.transcriptionTrack.replaceChildren();
     elements.audioTrack.replaceChildren();
-    state.clips.forEach(createClipElement);
-    renderTranscription();
+  state.clips.forEach(createClipElement);
+  renderTimelineLinkConnectors();
+  renderTranscription();
     selectClip(null);
     setPlayhead(data.playhead || 0);
     updateTimelineWidth();

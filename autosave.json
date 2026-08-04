@@ -1,16 +1,16 @@
 {
   "clips": [
     {
-      "id": "edc1dea6-f325-4074-a1de-57c441d27e0b",
-      "mediaId": "5c8c64fb-79a0-464f-8168-46e0c23be280",
-      "name": "voiceoptimizer-dubbelbehandlad2.mp4",
+      "id": "1c1e6661-8b01-45cb-a3e2-ff88e79f7fed",
+      "mediaId": "2af1cf34-d401-467e-8164-d246cc1fbe3a",
+      "name": "We Bought Temu Jet Boats So You Dont Have To.mp4",
       "kind": "video",
-      "mediaDuration": 17.968333,
-      "sourceWidth": 360,
-      "sourceHeight": 640,
+      "mediaDuration": 1333.313016,
+      "sourceWidth": 1920,
+      "sourceHeight": 1080,
       "start": 0,
       "trimStart": 0,
-      "trimEnd": 17.968333,
+      "trimEnd": 18.65,
       "crop": {
         "left": 0,
         "right": 0,
@@ -20,19 +20,19 @@
       "visualScale": 1,
       "trackIndex": 0,
       "muted": true,
-      "linkGroupId": "8421abd8-8a6d-4ba5-85e3-e26e9455dc59"
+      "linkGroupId": "f5fcf4e2-33c7-4232-9dd4-a4c905d3a28b"
     },
     {
-      "id": "efc5786c-4034-429b-b6c7-6f4ea08d6893",
-      "mediaId": "d1f751dd-ebd5-4686-b48f-74857b159cf2",
-      "name": "voiceoptimizer-dubbelbehandlad2_ljud.m4a",
+      "id": "cd406a80-3f78-4066-a8ee-8a26a4aebd2b",
+      "mediaId": "580dfdc3-1ea5-4a96-8125-d7bf05fe48d2",
+      "name": "We Bought Temu Jet Boats So You Dont Have To_ljud.m4a",
       "kind": "audio",
-      "mediaDuration": 17.951,
+      "mediaDuration": 1333.313016,
       "sourceWidth": 0,
       "sourceHeight": 0,
       "start": 0,
       "trimStart": 0,
-      "trimEnd": 17.951,
+      "trimEnd": 18.65,
       "crop": {
         "left": 0,
         "right": 0,
@@ -41,11 +41,11 @@
       },
       "muted": false,
       "trackIndex": 0,
-      "linkGroupId": "8421abd8-8a6d-4ba5-85e3-e26e9455dc59"
+      "linkGroupId": "f5fcf4e2-33c7-4232-9dd4-a4c905d3a28b"
     }
   ],
   "selectedId": null,
-  "playhead": 9.088,
+  "playhead": 25.775,
   "canvas": {
     "width": 1280,
     "height": 720

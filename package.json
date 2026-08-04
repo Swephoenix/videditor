@@ -1,6 +1,6 @@
 {
   "name": "nvidia-video-editor",
-  "version": "0.15.4",
+  "version": "0.15.5",
   "private": true,
   "description": "Lokal webbaserad videoredigerare med FFmpeg- och NVENC-export",
   "main": "server.js",
