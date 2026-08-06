@@ -22,7 +22,8 @@ const state = {
   visualTrackEls: [], audioTrackEls: [], visualLabelEls: [], audioLabelEls: [], cropActive: false, cropPreview: null,
   noiseProfileId: null, noiseProfileMediaId: null, waveformData: null, waveformDecoding: false,
   timelineAudioPlayers: new Map(), visualScaleDrag: null, visualMoveDrag: null,
-  previewLayers: new Map(), hiddenLayers: new Set(), importLayer: 'auto', timelineActive: false
+  previewLayers: new Map(), hiddenLayers: new Set(), importLayer: 'auto', timelineActive: false,
+  exportWindow: null
 };
 const editorHistory = {
   undo: [], redo: [], clipboard: null, restoring: false,
@@ -47,6 +48,7 @@ const elements = {
   timelineAudio: document.querySelector('#timeline-audio'),
   previewWindow: document.querySelector('.preview-window'),
   exportFrameLabel: document.querySelector('#export-frame-label'),
+  exportFrameOutline: document.querySelector('#export-frame-outline'),
   canvasFormat: document.querySelector('#canvas-format'),
   customCanvasSize: document.querySelector('#custom-canvas-size'),
   canvasWidth: document.querySelector('#canvas-width'),
@@ -187,16 +189,21 @@ document.querySelector('#close-transition').addEventListener('click', closeTrans
 elements.canvasFormat.addEventListener('change', applyCanvasFormat);
 elements.canvasWidth.addEventListener('change', applyCustomCanvasSize);
 elements.canvasHeight.addEventListener('change', applyCustomCanvasSize);
+elements.canvasWidth.addEventListener('input', applyCustomCanvasSize);
+elements.canvasHeight.addEventListener('input', applyCustomCanvasSize);
 
 function syncCanvasSliders() {
   if (!elements.canvasWidthSlider) return;
+  const dims = currentExportDims();
   const canvas = state.canvas || sourceCanvas() || { width: 1600, height: 900 };
-  elements.canvasWidthSlider.value = String(clamp(canvas.width, 64, 4096));
-  elements.canvasWidthValue.textContent = String(canvas.width);
-  elements.canvasHeightSlider.value = String(clamp(canvas.height, 64, 4096));
-  elements.canvasHeightValue.textContent = String(canvas.height);
+  elements.canvasWidthSlider.max = String(canvas.width);
+  elements.canvasHeightSlider.max = String(canvas.height);
+  elements.canvasWidthSlider.value = String(clamp(dims.width, 64, canvas.width));
+  elements.canvasWidthValue.textContent = String(dims.width);
+  elements.canvasHeightSlider.value = String(clamp(dims.height, 64, canvas.height));
+  elements.canvasHeightValue.textContent = String(dims.height);
   if (elements.canvasSizeSummary) {
-    elements.canvasSizeSummary.textContent = `${canvasRatioLabel(canvas)} · ${canvas.width}×${canvas.height}`;
+    elements.canvasSizeSummary.textContent = `${canvasRatioLabel(dims)} · ${dims.width}×${dims.height}`;
   }
 }
 
@@ -207,11 +214,15 @@ function handleCanvasSliderInput(event) {
     elements.canvasFormat.value = 'custom';
     elements.customCanvasSize.hidden = false;
   }
-  (isWidth ? elements.canvasWidth : elements.canvasHeight).value = String(value);
-  (isWidth ? elements.canvasWidthValue : elements.canvasHeightValue).textContent = String(value);
+  const dims = currentExportDims();
   beginInputEdit();
-  setCanvas({ width: elements.canvasWidth.value, height: elements.canvasHeight.value }, false);
+  setExportWindow(isWidth ? value : dims.width, isWidth ? dims.height : value);
+  const next = currentExportDims();
+  (isWidth ? elements.canvasWidth : elements.canvasHeight).value = String(isWidth ? next.width : next.height);
+  syncCanvasSliders();
+  updateAutoFitLabel();
   recordInputEdit();
+  persist();
 }
 
 elements.canvasWidthSlider.addEventListener('input', handleCanvasSliderInput);
@@ -779,7 +790,8 @@ function editorSnapshot() {
     playhead: state.playhead, canvas: state.canvas ? { ...state.canvas } : null,
     transcriptionMediaId: state.transcriptionMediaId,
     transcriptionSegments: cloneValue(state.transcriptionSegments),
-    hiddenLayers: [...state.hiddenLayers]
+    hiddenLayers: [...state.hiddenLayers],
+    exportWindow: state.exportWindow ? { ...state.exportWindow } : null
   };
 }
 
@@ -971,6 +983,9 @@ function restoreEditor(snapshot) {
   state.canvas = snapshot.canvas ? { ...snapshot.canvas } : null;
   state.playhead = snapshot.playhead;
   state.hiddenLayers = new Set(Array.isArray(snapshot.hiddenLayers) ? snapshot.hiddenLayers : []);
+  state.exportWindow = snapshot.exportWindow && snapshot.exportWindow.width
+    ? { ...snapshot.exportWindow }
+    : null;
   state.selectedId = null;
   state.selectedIds = new Set();
   clearDynamicTracks();
@@ -1740,7 +1755,7 @@ function updatePreviewWindowSize() {
   elements.previewWindow.style.width = `${Math.max(1, Math.floor(canvas.width * scale))}px`;
   elements.previewWindow.style.height = `${Math.max(1, Math.floor(canvas.height * scale))}px`;
   elements.previewWindow.style.aspectRatio = `${canvas.width} / ${canvas.height}`;
-  updateExportFrameLabel(canvas);
+  updateAutoFitLabel();
   refreshPreviewLayout();
 }
 
@@ -1823,15 +1838,9 @@ function contentBounds() {
   return { minX, minY, maxX, maxY };
 }
 
-function fitProjectToContent() {
+function transformProjectToBounds(bounds) {
   const canvas = state.canvas || sourceCanvas() || { width: 1600, height: 900 };
-  const bounds = contentBounds();
   if (!bounds) return null;
-  if (exportSubtitleCues()) {
-    bounds.minX = 0;
-    bounds.maxX = canvas.width;
-    bounds.maxY = canvas.height;
-  }
   const W = canvas.width;
   const H = canvas.height;
   const newWidth = Math.max(64, Math.round((bounds.maxX - bounds.minX) / 2) * 2);
@@ -1879,18 +1888,73 @@ function fitProjectToContent() {
   return { canvas: { width: newWidth, height: newHeight }, clips, bounds };
 }
 
+function fitProjectToContent() {
+  const canvas = state.canvas || sourceCanvas() || { width: 1600, height: 900 };
+  const bounds = contentBounds();
+  if (!bounds) return null;
+  if (exportSubtitleCues()) {
+    bounds.minX = 0;
+    bounds.maxX = canvas.width;
+    bounds.maxY = canvas.height;
+  }
+  return transformProjectToBounds(bounds);
+}
+
+function currentExportDims() {
+  const canvas = state.canvas || sourceCanvas() || { width: 1600, height: 900 };
+  if (state.exportWindow) return { width: state.exportWindow.width, height: state.exportWindow.height };
+  return { width: canvas.width, height: canvas.height };
+}
+
+function setExportWindow(width, height) {
+  const canvas = state.canvas || sourceCanvas() || { width: 1600, height: 900 };
+  const w = Math.min(evenCanvasDimension(width), evenCanvasDimension(canvas.width));
+  const h = Math.min(evenCanvasDimension(height), evenCanvasDimension(canvas.height));
+  if (w >= canvas.width - 1 && h >= canvas.height - 1) {
+    state.exportWindow = null;
+    return;
+  }
+  state.exportWindow = {
+    x: Math.max(0, Math.round((canvas.width - w) / 2)),
+    y: Math.max(0, Math.round((canvas.height - h) / 2)),
+    width: w,
+    height: h
+  };
+}
+
+function updateExportFrameOutline(windowRect) {
+  const outline = elements.exportFrameOutline;
+  if (!outline) return;
+  const canvas = state.canvas || sourceCanvas() || { width: 1600, height: 900 };
+  if (!windowRect) {
+    outline.style.left = '0%';
+    outline.style.top = '0%';
+    outline.style.width = '100%';
+    outline.style.height = '100%';
+    return;
+  }
+  outline.style.left = `${(windowRect.x / canvas.width) * 100}%`;
+  outline.style.top = `${(windowRect.y / canvas.height) * 100}%`;
+  outline.style.width = `${(windowRect.width / canvas.width) * 100}%`;
+  outline.style.height = `${(windowRect.height / canvas.height) * 100}%`;
+}
+
 function updateAutoFitLabel() {
   const canvas = state.canvas || sourceCanvas() || { width: 1600, height: 900 };
+  const dims = currentExportDims();
   if (!elements.autoFitCanvas || !elements.autoFitCanvas.checked) {
-    updateExportFrameLabel(canvas);
+    updateExportFrameLabel(dims);
+    updateExportFrameOutline(state.exportWindow);
     return;
   }
   const fitted = fitProjectToContent();
   if (fitted) {
     updateExportFrameLabel(fitted.canvas);
     elements.exportFrameLabel.textContent += ' · AUTOFIT';
+    updateExportFrameOutline(fitted.bounds);
   } else {
-    updateExportFrameLabel(canvas);
+    updateExportFrameLabel(dims);
+    updateExportFrameOutline(state.exportWindow);
   }
 }
 
@@ -1909,6 +1973,7 @@ function setCanvas(canvas, history = true) {
     recordHistory();
   }
   state.canvas = normalized;
+  state.exportWindow = null;
   elements.canvasWidth.value = String(normalized.width);
   elements.canvasHeight.value = String(normalized.height);
   syncCanvasSliders();
@@ -1933,7 +1998,15 @@ function applyCanvasFormat() {
 
 function applyCustomCanvasSize() {
   if (elements.canvasFormat.value !== 'custom') return;
-  setCanvas({ width: elements.canvasWidth.value, height: elements.canvasHeight.value });
+  beginInputEdit();
+  setExportWindow(Number(elements.canvasWidth.value), Number(elements.canvasHeight.value));
+  const dims = currentExportDims();
+  elements.canvasWidth.value = String(dims.width);
+  elements.canvasHeight.value = String(dims.height);
+  syncCanvasSliders();
+  updateAutoFitLabel();
+  recordInputEdit();
+  persist();
 }
 
 function syncCanvasControls() {
@@ -1942,10 +2015,11 @@ function syncCanvasControls() {
     .find(([, dimensions]) => dimensions.width === canvas.width && dimensions.height === canvas.height)?.[0];
   elements.canvasFormat.value = preset || 'custom';
   elements.customCanvasSize.hidden = Boolean(preset);
-  elements.canvasWidth.value = String(canvas.width);
-  elements.canvasHeight.value = String(canvas.height);
+  const dims = currentExportDims();
+  elements.canvasWidth.value = String(dims.width);
+  elements.canvasHeight.value = String(dims.height);
   syncCanvasSliders();
-  updateExportFrameLabel(canvas);
+  updateAutoFitLabel();
 }
 
 window.addEventListener('resize', updatePreviewWindowSize);
@@ -4992,6 +5066,20 @@ async function exportProject(format) {
         elements.exportMessage.textContent =
           `Anpassar format till innehåll (${fitted.canvas.width}×${fitted.canvas.height})…`;
       }
+    } else if (state.exportWindow) {
+      const windowRect = state.exportWindow;
+      const transformed = transformProjectToBounds({
+        minX: windowRect.x,
+        minY: windowRect.y,
+        maxX: windowRect.x + windowRect.width,
+        maxY: windowRect.y + windowRect.height
+      });
+      if (transformed) {
+        exportCanvas = transformed.canvas;
+        exportClips = transformed.clips;
+        elements.exportMessage.textContent =
+          `Exporterar yta ${transformed.canvas.width}×${transformed.canvas.height}…`;
+      }
     }
     const job = await api('/api/export', {
       method: 'POST',
@@ -5085,6 +5173,7 @@ function newProject(options = {}) {
   state.selectedId = null;
   state.selectedIds = new Set();
   state.canvas = null;
+  state.exportWindow = null;
   state.cropActive = false;
   state.cropPreview = null;
   state.transcriptionMediaId = null;
@@ -5123,6 +5212,7 @@ function saveProject() {
     createdAt: new Date().toISOString(),
     canvas: state.canvas ? { ...state.canvas } : null,
     hiddenLayers: [...state.hiddenLayers],
+    exportWindow: state.exportWindow ? { ...state.exportWindow } : null,
     playhead: state.playhead,
     transcriptionMediaId: state.transcriptionMediaId,
     transcriptionSegments: state.transcriptionSegments,
@@ -5161,6 +5251,9 @@ async function loadProject() {
     state.selectedIds = new Set();
     state.hiddenLayers = new Set(Array.isArray(data.hiddenLayers) ? data.hiddenLayers.map(Number).filter(Number.isFinite) : []);
     state.canvas = data.canvas && data.canvas.width ? { width: data.canvas.width, height: data.canvas.height } : null;
+    state.exportWindow = data.exportWindow && data.exportWindow.width
+      ? { x: data.exportWindow.x || 0, y: data.exportWindow.y || 0, width: data.exportWindow.width, height: data.exportWindow.height }
+      : null;
     syncCanvasControls();
     clearDynamicTracks();
     elements.visualTrack.replaceChildren();

@@ -1685,6 +1685,28 @@ function buildCircleMaskFilter(size) {
     `a='if(lte(${distance},${radius}),alpha(X,Y),0)',`;
 }
 
+async function generateCircleMask(maskPath, clip, width, height) {
+  const size = clamp(Number(clip.circular.size) || 0.5, 0.1, 0.5);
+  const radius = `${size.toFixed(4)}*min(W,H)`;
+  const distance = `sqrt((X-W/2)*(X-W/2)+(Y-H/2)*(Y-H/2))`;
+  const sW = Math.max(1, Math.round(Number(clip.media?.width) || 1));
+  const sH = Math.max(1, Math.round(Number(clip.media?.height) || 1));
+  const crop = clip.crop || { left: 0, right: 0, top: 0, bottom: 0 };
+  const cw = Math.max(2, Math.round(sW * (1 - crop.left - crop.right)));
+  const ch = Math.max(2, Math.round(sH * (1 - crop.top - crop.bottom)));
+  const visualScale = Number.isFinite(clip.visualScale) ? clip.visualScale : 1;
+  const zoom = visualScale !== 1
+    ? `scale=w='trunc(iw*${visualScale.toFixed(6)}/2)*2':h='trunc(ih*${visualScale.toFixed(6)}/2)*2',`
+    : '';
+  const args = ['-hide_banner', '-y',
+    '-f', 'lavfi', '-i', `color=c=white:s=${cw}x${ch}:r=1:d=1`,
+    '-vf',
+    `scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
+    `${zoom}format=gray,geq=lum='if(lte(${distance},${radius}),255,0)'`,
+    '-frames:v', '1', maskPath];
+  await runProcess('ffmpeg', args);
+}
+
 function buildVisualContentFilter(clip, width, height) {
   const visualScale = Number.isFinite(clip.visualScale) ? clip.visualScale : 1;
   const scaleToCanvas = `scale=${width}:${height}:force_original_aspect_ratio=decrease,`;
@@ -2015,6 +2037,20 @@ async function renderProject(jobId, project) {
     clip._htmlBlockHeight = blockHeight;
     htmlIndex += 1;
   }
+  const circleClips = project.clips.filter((clip) =>
+    (clip.kind === 'video' || clip.kind === 'image') && clip.circular
+  );
+  for (const clip of circleClips) {
+    const maskPath = path.join(EXPORT_DIR, `${jobId}-mask-${inputIndex}.png`);
+    try {
+      await generateCircleMask(maskPath, clip, width, height);
+      clip._circleMaskPath = maskPath;
+      tempPngs.push(maskPath);
+    } catch (error) {
+      console.warn(`Cirkelmask kunde inte genereras för ${clip.media?.storedName}: ${error.message}`);
+      clip._circleMaskPath = null;
+    }
+  }
   if (htmlClips.length > 0) {
     job.phase = 'encode';
     job.phaseStartedAt = new Date().toISOString();
@@ -2033,6 +2069,13 @@ async function renderProject(jobId, project) {
     inputIndex += 1;
     args.push('-framerate', '30', '-start_number', '1', '-i', path.join(clip._htmlFramesDir, 'frame-%04d.png'));
   }
+  for (const clip of project.clips) {
+    if (clip._circleMaskPath) {
+      clip._circleMaskInputIndex = inputIndex;
+      inputIndex += 1;
+      args.push('-loop', '1', '-framerate', '30', '-i', clip._circleMaskPath);
+    }
+  }
   const filters = [`color=c=black:s=${width}x${height}:r=30:d=${project.duration.toFixed(3)}[base]`];
   const videos = [];
   const audios = [];
@@ -2049,7 +2092,11 @@ async function renderProject(jobId, project) {
         ? `crop=iw*${cropWidth.toFixed(6)}:ih*${cropHeight.toFixed(6)}:` +
           `iw*${clip.crop.left.toFixed(6)}:ih*${clip.crop.top.toFixed(6)},`
         : '';
-      const circleFilter = clip.circular ? buildCircleMaskFilter(clip.circular.size) : '';
+      const circleFilter = clip.circular
+        ? (clip._circleMaskPath
+            ? `format=rgba,[${clip._circleMaskInputIndex}:v]alphamerge,`
+            : buildCircleMaskFilter(clip.circular.size))
+        : '';
       const contentFilter = buildVisualContentFilter(clip, width, height);
       const frameFilter = buildVisualFrameFilter(clip, width, height);
       let animPost = '';

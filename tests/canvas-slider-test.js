@@ -34,7 +34,7 @@ window.fetch = async () => ({
 try {
   window.eval(timelineModelJs);
   window.eval(`${appJs}
-    window.__test = { state, setCanvas, syncCanvasSliders };
+    window.__test = { state, setCanvas, syncCanvasSliders, setExportWindow };
   `);
 } catch (e) {
   console.log('SCRIPT ERROR:', e.message, e.stack);
@@ -55,15 +55,26 @@ setTimeout(() => {
     if (widthSlider.value !== '1920' || heightSlider.value !== '1080') throw new Error('Reglagen synkas inte med canvas.');
     if (widthValue.textContent !== '1920' || heightValue.textContent !== '1080') throw new Error('Output-värdena uppdateras inte.');
 
-    // Dra bredd-reglaget till 1280.
+    // Dra bredd-reglaget till 1280 -> CANVAS får INTE ändras (media pressas inte ihop),
+    // i stället sätts ett exportfönster och ramen visar det.
+    const previewWindow = document.querySelector('.preview-window');
+    const outline = document.querySelector('#export-frame-outline');
     widthSlider.value = '1280';
     widthSlider.dispatchEvent(new window.Event('input', { bubbles: true }));
-    const previewWindow = document.querySelector('.preview-window');
     console.log('Efter drag till 1280: canvas=', state.canvas.width, 'x', state.canvas.height,
-      'nummerfält=', document.querySelector('#canvas-width').value, 'aspectRatio=', previewWindow.style.aspectRatio);
-    if (state.canvas.width !== 1280 || state.canvas.height !== 1080) throw new Error('Canvas uppdaterades inte av reglaget.');
+      'fönster=', JSON.stringify(state.exportWindow), 'aspectRatio=', previewWindow.style.aspectRatio);
+    if (state.canvas.width !== 1920 || state.canvas.height !== 1080) throw new Error('Canvas får inte ändras av reglaget.');
+    if (previewWindow.style.aspectRatio !== '1920 / 1080') throw new Error('Previewn får inte anpassas om (media pressas ihop).');
+    if (!state.exportWindow || state.exportWindow.width !== 1280 || state.exportWindow.height !== 1080) {
+      throw new Error(`Exportfönstret sattes fel: ${JSON.stringify(state.exportWindow)}`);
+    }
+    if (Math.abs(state.exportWindow.x - 320) > 1) throw new Error('Fönstret ska vara centrerat (x=320).');
     if (document.querySelector('#canvas-width').value !== '1280') throw new Error('Nummerfältet synkas inte med reglaget.');
-    if (previewWindow.style.aspectRatio !== '1280 / 1080') throw new Error('Previewn uppdaterar inte sitt format.');
+    console.log('Ramen:', outline.style.left, outline.style.top, outline.style.width, outline.style.height,
+      '(expect 16.67% 0% 66.67% 100%)');
+    if (outline.style.left !== '16.666666666666668%' && parseFloat(outline.style.left) < 16.5) {
+      throw new Error('Exportramen visar inte fönstret.');
+    }
 
     // Formatet ska växla till "Egen storlek" automatiskt.
     const formatSelect = document.querySelector('#canvas-format');
@@ -74,8 +85,16 @@ setTimeout(() => {
     // Höjd-reglaget också.
     heightSlider.value = '600';
     heightSlider.dispatchEvent(new window.Event('input', { bubbles: true }));
-    console.log('Efter drag höjd till 600: canvas=', state.canvas.width, 'x', state.canvas.height);
-    if (state.canvas.height !== 600) throw new Error('Höjd-reglaget uppdaterade inte canvas.');
+    console.log('Efter drag höjd till 600: fönster=', JSON.stringify(state.exportWindow));
+    if (!state.exportWindow || state.exportWindow.height !== 600) throw new Error('Höjd-reglaget uppdaterade inte fönstret.');
+
+    // Tillbaka till full storlek -> fönstret nollställs.
+    widthSlider.value = '1920';
+    widthSlider.dispatchEvent(new window.Event('input', { bubbles: true }));
+    heightSlider.value = '1080';
+    heightSlider.dispatchEvent(new window.Event('input', { bubbles: true }));
+    console.log('Efter tillbaka till full: fönster=', JSON.stringify(state.exportWindow), '(expect null)');
+    if (state.exportWindow !== null) throw new Error('Full storlek ska nollställa fönstret.');
 
     // Verktygsknappen: öppna popovern, verifiera innehåll, stäng med utanför-klick.
     const qtCanvas = document.querySelector('#qt-canvas');
@@ -86,7 +105,7 @@ setTimeout(() => {
     console.log('Popover efter klick på Yta-knappen: hidden=', popover.hidden, '(expect false)');
     if (popover.hidden) throw new Error('Popovern öppnades inte av Yta-knappen.');
     if (qtCanvas.getAttribute('aria-expanded') !== 'true') throw new Error('aria-expanded sattes inte.');
-    if (document.querySelector('#canvas-width-slider').value !== '1280') throw new Error('Reglagen synkas inte i popovern.');
+    if (document.querySelector('#canvas-width-slider').value !== '1920') throw new Error('Reglagen synkas inte i popovern.');
 
     document.body.dispatchEvent(new window.Event('click', { bubbles: true }));
     console.log('Popover efter klick utanför: hidden=', popover.hidden, '(expect true)');
