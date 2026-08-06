@@ -37,3 +37,4 @@ audio-analyses.json
 *.sql.zip
 emails.json
 *.log
+autosave.json
