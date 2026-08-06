@@ -21,7 +21,8 @@ const state = {
   transcriptionIndex: new Map(), transcriptSearchResults: [], transcriptSearchCursor: -1,
   visualTrackEls: [], audioTrackEls: [], visualLabelEls: [], audioLabelEls: [], cropActive: false, cropPreview: null,
   noiseProfileId: null, noiseProfileMediaId: null, waveformData: null, waveformDecoding: false,
-  timelineAudioPlayers: new Map(), visualScaleDrag: null
+  timelineAudioPlayers: new Map(), visualScaleDrag: null, visualMoveDrag: null,
+  previewLayers: new Map(), hiddenLayers: new Set(), importLayer: 'auto', timelineActive: false
 };
 const editorHistory = {
   undo: [], redo: [], clipboard: null, restoring: false,
@@ -50,6 +51,13 @@ const elements = {
   customCanvasSize: document.querySelector('#custom-canvas-size'),
   canvasWidth: document.querySelector('#canvas-width'),
   canvasHeight: document.querySelector('#canvas-height'),
+  canvasWidthSlider: document.querySelector('#canvas-width-slider'),
+  canvasHeightSlider: document.querySelector('#canvas-height-slider'),
+  canvasWidthValue: document.querySelector('#canvas-width-value'),
+  canvasHeightValue: document.querySelector('#canvas-height-value'),
+  qtCanvas: document.querySelector('#qt-canvas'),
+  canvasPopover: document.querySelector('#canvas-size-popover'),
+  canvasSizeSummary: document.querySelector('#canvas-size-summary'),
   blurLayer: document.querySelector('#blur-layer'),
   htmlLayer: document.querySelector('#html-layer'),
   htmlTools: document.querySelector('#html-tools'),
@@ -91,6 +99,8 @@ const elements = {
   textPresetButtons: [...document.querySelectorAll('[data-text-preset]')],
   useNvidia: document.querySelector('#use-nvidia'),
   useUpscale: document.querySelector('#use-upscale'),
+  autoFitCanvas: document.querySelector('#auto-fit-canvas'),
+  exportSubtitles: document.querySelector('#export-subtitles'),
   exportQuality: document.querySelector('#export-quality'),
   burnTranscription: document.querySelector('#burn-transcription'),
   transcriptWords: document.querySelector('#transcript-words'),
@@ -147,7 +157,8 @@ const elements = {
   transitionDuration: document.querySelector('#transition-duration'),
   transitionDurationValue: document.querySelector('#transition-duration-value'),
   removeTransition: document.querySelector('#remove-transition'),
-  linkToggle: document.querySelector('#qt-link')
+  linkToggle: document.querySelector('#qt-link'),
+  importLayer: document.querySelector('#import-layer')
 };
 
 const CANVAS_PRESETS = Object.freeze({
@@ -176,6 +187,57 @@ document.querySelector('#close-transition').addEventListener('click', closeTrans
 elements.canvasFormat.addEventListener('change', applyCanvasFormat);
 elements.canvasWidth.addEventListener('change', applyCustomCanvasSize);
 elements.canvasHeight.addEventListener('change', applyCustomCanvasSize);
+
+function syncCanvasSliders() {
+  if (!elements.canvasWidthSlider) return;
+  const canvas = state.canvas || sourceCanvas() || { width: 1600, height: 900 };
+  elements.canvasWidthSlider.value = String(clamp(canvas.width, 64, 4096));
+  elements.canvasWidthValue.textContent = String(canvas.width);
+  elements.canvasHeightSlider.value = String(clamp(canvas.height, 64, 4096));
+  elements.canvasHeightValue.textContent = String(canvas.height);
+  if (elements.canvasSizeSummary) {
+    elements.canvasSizeSummary.textContent = `${canvasRatioLabel(canvas)} · ${canvas.width}×${canvas.height}`;
+  }
+}
+
+function handleCanvasSliderInput(event) {
+  const isWidth = event.currentTarget === elements.canvasWidthSlider;
+  const value = evenCanvasDimension(Number(event.currentTarget.value));
+  if (elements.canvasFormat.value !== 'custom') {
+    elements.canvasFormat.value = 'custom';
+    elements.customCanvasSize.hidden = false;
+  }
+  (isWidth ? elements.canvasWidth : elements.canvasHeight).value = String(value);
+  (isWidth ? elements.canvasWidthValue : elements.canvasHeightValue).textContent = String(value);
+  beginInputEdit();
+  setCanvas({ width: elements.canvasWidth.value, height: elements.canvasHeight.value }, false);
+  recordInputEdit();
+}
+
+elements.canvasWidthSlider.addEventListener('input', handleCanvasSliderInput);
+elements.canvasHeightSlider.addEventListener('input', handleCanvasSliderInput);
+
+elements.qtCanvas.addEventListener('click', () => {
+  const willOpen = elements.canvasPopover.hidden;
+  elements.canvasPopover.hidden = !willOpen;
+  elements.qtCanvas.classList.toggle('active', willOpen);
+  elements.qtCanvas.setAttribute('aria-expanded', String(willOpen));
+  if (willOpen) syncCanvasSliders();
+});
+document.addEventListener('click', (event) => {
+  if (!(event.target instanceof Element) || !event.target.closest('#qt-canvas, #canvas-size-popover')) {
+    elements.canvasPopover.hidden = true;
+    elements.qtCanvas.classList.remove('active');
+    elements.qtCanvas.setAttribute('aria-expanded', 'false');
+  }
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    elements.canvasPopover.hidden = true;
+    elements.qtCanvas.classList.remove('active');
+    elements.qtCanvas.setAttribute('aria-expanded', 'false');
+  }
+});
 elements.transitionDuration.addEventListener('input', () => {
   elements.transitionDurationValue.value = `${Number(elements.transitionDuration.value).toFixed(1)} s`;
 });
@@ -219,6 +281,10 @@ elements.cropPan.addEventListener('pointerdown', startCropPan);
 elements.visualScaleHandles.forEach((handle) => handle.addEventListener('pointerdown', startVisualScaleDrag));
 document.addEventListener('pointermove', moveVisualScaleDrag);
 document.addEventListener('pointerup', stopVisualScaleDrag);
+elements.preview.addEventListener('pointerdown', startVisualMoveDrag);
+elements.imagePreview.addEventListener('pointerdown', startVisualMoveDrag);
+document.addEventListener('pointermove', moveVisualMoveDrag);
+document.addEventListener('pointerup', stopVisualMoveDrag);
 document.addEventListener('pointermove', moveCropDrag);
 document.addEventListener('pointerup', stopCropDrag);
 elements.mediaInput.addEventListener('change', () => {
@@ -227,6 +293,40 @@ elements.mediaInput.addEventListener('change', () => {
   }
   elements.mediaInput.value = '';
 });
+
+elements.importLayer.addEventListener('change', () => {
+  const value = elements.importLayer.value;
+  state.importLayer = value === 'auto' ? 'auto' : Math.max(0, Math.floor(Number(value) || 0));
+});
+
+elements.autoFitCanvas.addEventListener('change', updateAutoFitLabel);
+
+function syncExportSubtitlesPrefill() {
+  if (elements.exportSubtitles && state.transcriptionSegments.length > 0) {
+    elements.exportSubtitles.checked = true;
+    updateAutoFitLabel();
+  }
+}
+
+function exportSubtitleCues() {
+  if (!elements.exportSubtitles?.checked || !state.transcriptionSegments.length || !state.transcriptionMediaId) return null;
+  const clip = state.clips.find(
+    (item) => (item.kind === 'video' || item.kind === 'audio') && item.mediaId === state.transcriptionMediaId
+  );
+  if (!clip) return null;
+  const offset = (clip.start || 0) - (clip.trimStart || 0);
+  const cues = [];
+  for (const segment of state.transcriptionSegments) {
+    const text = String(segment.text || '').trim();
+    if (!text) continue;
+    const start = Math.max(0, offset + (Number(segment.start) || 0));
+    const end = Math.max(start + 0.05, offset + (Number(segment.end) || Number(segment.start) || 0));
+    cues.push({ start, end, text });
+  }
+  return cues.length ? cues : null;
+}
+
+elements.exportSubtitles.addEventListener('change', updateAutoFitLabel);
 
 const SUPPORTED_TYPES = ['video/', 'audio/', 'image/jpeg', 'image/png', 'image/webp', 'image/bmp', 'image/tiff', 'image/svg+xml'];
 
@@ -277,11 +377,12 @@ elements.cropDone.addEventListener('click', () => {
   if (!clip || (clip.kind !== 'video' && clip.kind !== 'image')) return;
   recordHistory();
   clip.crop = { ...(state.cropPreview || clip.crop || { left: 0, right: 0, top: 0, bottom: 0 }) };
-  applyVisualLayout(clip, clip.kind === 'video' ? elements.preview : elements.imagePreview);
+  applyVisualLayout(clip, visualMediaElement(clip));
   hideCropOverlay();
   state.cropActive = false;
   elements.cropTools.hidden = true;
   refreshPreviewLayout();
+  updateAutoFitLabel();
 });
 elements.cropCancel.addEventListener('click', cancelCrop);
 document.querySelector('#export').addEventListener('click', () => exportProject('mp4'));
@@ -571,6 +672,59 @@ elements.aiChatForm.addEventListener('submit', async (event) => {
 });
 document.addEventListener('keydown', handleKeyboardShortcut);
 
+document.addEventListener('mousedown', (event) => {
+  state.timelineActive = Boolean(event.target.closest?.('.timeline-container'));
+}, true);
+
+function selectAllClips() {
+  if (!state.timelineActive || !state.clips.length) return false;
+  selectClips(state.clips.map((clip) => clip.id));
+  return true;
+}
+
+function isImageFile(file) {
+  return Boolean(file && file.type && file.type.startsWith('image/'));
+}
+
+async function importClipboardImages(event) {
+  if (editorHistory.clipboard) return false;
+  if (isTextEntry(event?.target)) return false;
+  const files = event?.clipboardData ? Array.from(event.clipboardData.files || []) : [];
+  const images = files.filter(isImageFile);
+  if (images.length) {
+    event.preventDefault();
+    for (const file of images) uploadMedia(file);
+    return true;
+  }
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.read === 'function' && document.hasFocus()) {
+      const items = await navigator.clipboard.read();
+      const found = [];
+      for (const item of items) {
+        for (const type of item.types) {
+          if (type.startsWith('image/')) {
+            const blob = await item.getType(type);
+            const extension = type.split('/')[1].replace('jpeg', 'jpg');
+            const file = new File([blob], `klistrad-bild-${Date.now()}.${extension || 'png'}`, { type });
+            found.push(file);
+          }
+        }
+      }
+      if (found.length) {
+        event.preventDefault();
+        for (const file of found) uploadMedia(file);
+        return true;
+      }
+    }
+  } catch (_error) { /* clipboard-läsning saknar tillstånd – ignorera */ }
+  if (files.length) elements.status.textContent = 'Ingen bild i urklipp – kopiera en bild eller ett klipp först.';
+  return false;
+}
+
+document.addEventListener('paste', (event) => {
+  importClipboardImages(event).catch(() => {});
+});
+
 function secondsToPixels(seconds) { return seconds * timelinePixelsPerSecond; }
 function pixelsToSeconds(pixels) { return Math.max(0, pixels / timelinePixelsPerSecond); }
 function clipDuration(clip) { return clip.trimEnd - clip.trimStart; }
@@ -624,7 +778,8 @@ function editorSnapshot() {
     clips: cloneValue(state.clips), selectedId: state.selectedId,
     playhead: state.playhead, canvas: state.canvas ? { ...state.canvas } : null,
     transcriptionMediaId: state.transcriptionMediaId,
-    transcriptionSegments: cloneValue(state.transcriptionSegments)
+    transcriptionSegments: cloneValue(state.transcriptionSegments),
+    hiddenLayers: [...state.hiddenLayers]
   };
 }
 
@@ -779,6 +934,7 @@ function cleanEmptyVisualTracks() {
   for (let i = 0; i < state.visualLabelEls.length; i += 1) {
     state.visualLabelEls[i].textContent = `V${i + 1}`;
   }
+  syncLayerEye();
 }
 
 function clearDynamicTracks() {
@@ -794,6 +950,7 @@ function clearDynamicTracks() {
   state.visualLabelEls = state.visualLabelEls.slice(0, 1);
   state.audioTrackEls = state.audioTrackEls.slice(0, 1);
   state.audioLabelEls = state.audioLabelEls.slice(0, 1);
+  syncLayerEye();
 }
 
 function restoreEditor(snapshot) {
@@ -813,6 +970,7 @@ function restoreEditor(snapshot) {
   rebuildTranscriptionIndex();
   state.canvas = snapshot.canvas ? { ...snapshot.canvas } : null;
   state.playhead = snapshot.playhead;
+  state.hiddenLayers = new Set(Array.isArray(snapshot.hiddenLayers) ? snapshot.hiddenLayers : []);
   state.selectedId = null;
   state.selectedIds = new Set();
   clearDynamicTracks();
@@ -823,6 +981,7 @@ function restoreEditor(snapshot) {
   renderTranscription();
   const selectedId = state.clips.some((clip) => clip.id === snapshot.selectedId) ? snapshot.selectedId : null;
   selectClip(selectedId);
+  syncLayerEye();
   setPlayhead(snapshot.playhead);
   updateTimelineWidth();
   updatePreviewWindowSize();
@@ -885,6 +1044,8 @@ async function initialize() {
   state.visualLabelEls = [document.querySelector('#visual-label')];
   state.audioTrackEls = [elements.audioTrack];
   state.audioLabelEls = [document.querySelector('#audio-label')];
+  syncImportLayerOptions();
+  syncLayerEye();
   const saved = loadPersisted();
   if (saved) restoreEditor(saved);
   syncCanvasControls();
@@ -1037,7 +1198,10 @@ function addMediaClip(media) {
     : clip.kind === 'audio')
     .reduce((end, clip) => Math.max(end, clip.start + clipDuration(clip)), 0);
   const initialDuration = kind === 'image' ? 5 : media.duration;
-  const trackIndex = allocateTrack(kind, lastEnd, lastEnd + initialDuration);
+  const requestedLayer = isVisual && Number.isInteger(state.importLayer) ? state.importLayer : null;
+  const trackIndex = requestedLayer != null
+    ? requestedLayer
+    : allocateTrack(kind, lastEnd, lastEnd + initialDuration);
   const clip = {
     id: crypto.randomUUID(), mediaId: media.id, name: media.name, kind,
     mediaDuration: kind === 'image' ? MAX_IMAGE_SECONDS : media.duration,
@@ -1045,11 +1209,20 @@ function addMediaClip(media) {
     start: lastEnd, trimStart: 0, trimEnd: initialDuration,
     crop: { left: 0, right: 0, top: 0, bottom: 0 },
     visualScale: 1,
+    posX: 0,
+    posY: 0,
+    circular: null,
     trackIndex
   };
   state.clips.push(clip);
-  createClipElement(clip);
-  selectClip(clip.id);
+  if (requestedLayer != null) {
+    state.selectedId = clip.id;
+    state.selectedIds = new Set([clip.id]);
+    rebuildTrackLayout([clip.id]);
+  } else {
+    createClipElement(clip);
+    selectClip(clip.id);
+  }
   setPlayhead(clip.start);
   if (kind === 'video' && media.hasAudio) autoSplitAudio(clip);
   return clip;
@@ -1182,6 +1355,7 @@ async function pollTranscribeJob(id) {
       state.transcriptionSegments = job.segments || [];
       rebuildTranscriptionIndex();
       renderTranscription();
+      syncExportSubtitlesPrefill();
       persist();
       elements.transcribeMessage.textContent = `Transkribering klar: ${state.transcriptionSegments.length} segment.`;
       elements.transcribe.disabled = false;
@@ -1598,6 +1772,128 @@ function sourceCanvas() {
   return { width: visual.sourceWidth, height: visual.sourceHeight };
 }
 
+function contentBounds() {
+  const canvas = state.canvas || sourceCanvas() || { width: 1600, height: 900 };
+  const W = canvas.width;
+  const H = canvas.height;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const clip of state.clips) {
+    if (clip.kind !== 'video' && clip.kind !== 'image') continue;
+    if (!layerVisible(clip.trackIndex || 0)) continue;
+    const sW = Number(clip.sourceWidth);
+    const sH = Number(clip.sourceHeight);
+    if (!sW || !sH) continue;
+    const crop = clip.crop || { left: 0, right: 0, top: 0, bottom: 0 };
+    const cropW = sW * (1 - crop.left - crop.right);
+    const cropH = sH * (1 - crop.top - crop.bottom);
+    const scale = Math.min(W / cropW, H / cropH) * clamp(Number(clip.visualScale) || 1, 0.1, 4);
+    const visW = cropW * scale;
+    const visH = cropH * scale;
+    const left = (W - visW) / 2 + (Number(clip.posX) || 0) * W;
+    const top = (H - visH) / 2 + (Number(clip.posY) || 0) * H;
+    let cMinX;
+    let cMaxX;
+    let cMinY;
+    let cMaxY;
+    const circularSize = clip.circular ? clamp(Number(clip.circular.size) || 0.5, 0.1, 0.5) : 0;
+    if (circularSize > 0) {
+      const radius = circularSize * Math.min(visW, visH);
+      const centerX = left + visW / 2;
+      const centerY = top + visH / 2;
+      cMinX = clamp(centerX - radius, 0, W);
+      cMaxX = clamp(centerX + radius, 0, W);
+      cMinY = clamp(centerY - radius, 0, H);
+      cMaxY = clamp(centerY + radius, 0, H);
+    } else {
+      cMinX = clamp(left, 0, W);
+      cMaxX = clamp(left + visW, 0, W);
+      cMinY = clamp(top, 0, H);
+      cMaxY = clamp(top + visH, 0, H);
+    }
+    if (cMaxX <= cMinX || cMaxY <= cMinY) continue;
+    minX = Math.min(minX, cMinX);
+    minY = Math.min(minY, cMinY);
+    maxX = Math.max(maxX, cMaxX);
+    maxY = Math.max(maxY, cMaxY);
+  }
+  if (!Number.isFinite(minX)) return null;
+  return { minX, minY, maxX, maxY };
+}
+
+function fitProjectToContent() {
+  const canvas = state.canvas || sourceCanvas() || { width: 1600, height: 900 };
+  const bounds = contentBounds();
+  if (!bounds) return null;
+  if (exportSubtitleCues()) {
+    bounds.minX = 0;
+    bounds.maxX = canvas.width;
+    bounds.maxY = canvas.height;
+  }
+  const W = canvas.width;
+  const H = canvas.height;
+  const newWidth = Math.max(64, Math.round((bounds.maxX - bounds.minX) / 2) * 2);
+  const newHeight = Math.max(64, Math.round((bounds.maxY - bounds.minY) / 2) * 2);
+  if (newWidth >= W - 1 && newHeight >= H - 1) return null;
+  const shiftX = bounds.minX;
+  const shiftY = bounds.minY;
+  const clips = state.clips.map((clip) => {
+    const c = { ...clip };
+    if (clip.kind === 'video' || clip.kind === 'image') {
+      if (Number.isFinite(c.posX)) c.posX = ((W - newWidth) / 2 + c.posX * W - shiftX) / newWidth;
+      if (Number.isFinite(c.posY)) c.posY = ((H - newHeight) / 2 + c.posY * H - shiftY) / newHeight;
+    } else if (clip.kind === 'color' || clip.kind === 'html') {
+      const block = clip.kind === 'color' ? cloneValue(c.color) : cloneValue(c.html);
+      if (block) {
+        block.x = ((block.x * W) - shiftX) / newWidth;
+        block.y = ((block.y * H) - shiftY) / newHeight;
+        block.width = (block.width * W) / newWidth;
+        block.height = (block.height * H) / newHeight;
+        if (clip.kind === 'color') c.color = block;
+        else c.html = block;
+      }
+    } else if (clip.kind === 'text') {
+      const text = cloneValue(c.text);
+      if (text) {
+        text.x = (((text.x / 100) * W - shiftX) / newWidth) * 100;
+        text.y = (((text.y / 100) * H - shiftY) / newHeight) * 100;
+        if (Number.isFinite(text.fontSize)) text.fontSize = (text.fontSize * H) / newHeight;
+        c.text = text;
+      }
+    } else if (clip.kind === 'blur') {
+      const blur = cloneValue(c.blur);
+      if (blur && Array.isArray(blur.boxes)) {
+        for (const box of blur.boxes) {
+          for (const point of box.points || []) {
+            point.x = (point.x * W - shiftX) / newWidth;
+            point.y = (point.y * H - shiftY) / newHeight;
+          }
+        }
+        c.blur = blur;
+      }
+    }
+    return c;
+  });
+  return { canvas: { width: newWidth, height: newHeight }, clips, bounds };
+}
+
+function updateAutoFitLabel() {
+  const canvas = state.canvas || sourceCanvas() || { width: 1600, height: 900 };
+  if (!elements.autoFitCanvas || !elements.autoFitCanvas.checked) {
+    updateExportFrameLabel(canvas);
+    return;
+  }
+  const fitted = fitProjectToContent();
+  if (fitted) {
+    updateExportFrameLabel(fitted.canvas);
+    elements.exportFrameLabel.textContent += ' · AUTOFIT';
+  } else {
+    updateExportFrameLabel(canvas);
+  }
+}
+
 function evenCanvasDimension(value) {
   return Math.max(64, Math.min(4096, Math.round(Number(value) / 2) * 2));
 }
@@ -1615,9 +1911,11 @@ function setCanvas(canvas, history = true) {
   state.canvas = normalized;
   elements.canvasWidth.value = String(normalized.width);
   elements.canvasHeight.value = String(normalized.height);
+  syncCanvasSliders();
   updatePreviewWindowSize();
   updateCropOverlay();
   persist();
+  updateAutoFitLabel();
   return true;
 }
 
@@ -1646,6 +1944,7 @@ function syncCanvasControls() {
   elements.customCanvasSize.hidden = Boolean(preset);
   elements.canvasWidth.value = String(canvas.width);
   elements.canvasHeight.value = String(canvas.height);
+  syncCanvasSliders();
   updateExportFrameLabel(canvas);
 }
 
@@ -1670,6 +1969,27 @@ function allocateTrack(kind, start, end, ignoreId = null) {
   return timelineModel.firstFreeTrack(state.clips, trackKinds(kind), start, end, ignoreId);
 }
 
+function syncImportLayerOptions() {
+  const select = elements.importLayer;
+  if (!select) return;
+  const maxLayer = Math.max(0, state.visualTrackEls.length);
+  const selected = typeof state.importLayer === 'number' ? state.importLayer : null;
+  const fragment = document.createDocumentFragment();
+  const autoOpt = document.createElement('option');
+  autoOpt.value = 'auto';
+  autoOpt.textContent = 'Auto';
+  fragment.appendChild(autoOpt);
+  for (let i = 0; i <= maxLayer; i += 1) {
+    const option = document.createElement('option');
+    option.value = String(i);
+    option.textContent = `Lager ${i + 1}`;
+    fragment.appendChild(option);
+  }
+  select.replaceChildren(fragment);
+  if (selected != null && selected <= maxLayer) select.value = String(selected);
+  else select.value = 'auto';
+}
+
 function ensureVisualTrack(index) {
   while (state.visualTrackEls.length <= index) {
     const trackIndex = state.visualTrackEls.length;
@@ -1686,6 +2006,8 @@ function ensureVisualTrack(index) {
     state.visualTrackEls.push(track);
     if (trackIndex === 0) track.id = 'visual-track';
   }
+  syncImportLayerOptions();
+  syncLayerEye();
   return state.visualTrackEls[index];
 }
 
@@ -1936,6 +2258,7 @@ function selectClips(ids, primaryId = null, options = {}) {
   updateBlurTools(clip);
   updateColorTools(clip);
   updateAnimTools(clip);
+  updateShapeTools(clip);
   updateTextTools(clip);
   updateHtmlTools(clip);
   updateAudioTools(clip);
@@ -2017,6 +2340,8 @@ function updateCropOverlay() {
   if (!pw || !ph) return;
 
   let l, r, t, b;
+  const offX = (Number(clip.posX) || 0) * pw;
+  const offY = (Number(clip.posY) || 0) * ph;
   if (clip.kind === 'video' && clip.sourceWidth && clip.sourceHeight) {
     const committed = clip.crop || { left: 0, right: 0, top: 0, bottom: 0 };
     const sW = Number(clip.sourceWidth);
@@ -2028,15 +2353,15 @@ function updateCropOverlay() {
     const vT = (ph - ch_c * scale) / 2 - committed.top * sH * scale;
     const vW = sW * scale;
     const vH = sH * scale;
-    l = vL + c.left * vW;
-    r = vL + (1 - c.right) * vW;
-    t = vT + c.top * vH;
-    b = vT + (1 - c.bottom) * vH;
+    l = vL + c.left * vW + offX;
+    r = vL + (1 - c.right) * vW + offX;
+    t = vT + c.top * vH + offY;
+    b = vT + (1 - c.bottom) * vH + offY;
   } else {
-    l = c.left * pw;
-    r = (1 - c.right) * pw;
-    t = c.top * ph;
-    b = (1 - c.bottom) * ph;
+    l = c.left * pw + offX;
+    r = (1 - c.right) * pw + offX;
+    t = c.top * ph + offY;
+    b = (1 - c.bottom) * ph + offY;
   }
 
   const w = Math.max(0, r - l);
@@ -2120,8 +2445,11 @@ function startCropDrag(event) {
     initialCrop: { ...(state.cropPreview || clip.crop || { left: 0, right: 0, top: 0, bottom: 0 }) },
     snapshot: editorSnapshot(), historyRecorded: false
   };
-  if (clip.kind === 'video' && !elements.preview.paused && elements.preview.readyState >= 2) {
-    elements.preview.pause();
+  if (clip.kind === 'video') {
+    const previewElement = visualMediaElement(clip);
+    if (previewElement && !previewElement.paused && previewElement.readyState >= 2) {
+      previewElement.pause();
+    }
   }
   event.preventDefault();
 }
@@ -2257,6 +2585,12 @@ function normalizeColorBlock(rawColor) {
 
 function normalizeRestoredClip(clip) {
   if (clip?.kind === 'color') clip.color = normalizeColorBlock(clip.color);
+  if (clip?.kind === 'video' || clip?.kind === 'image') {
+    if (!Number.isFinite(clip.posX)) clip.posX = 0;
+    if (!Number.isFinite(clip.posY)) clip.posY = 0;
+    if (clip.circular && !Number.isFinite(clip.circular.size)) clip.circular.size = 0.5;
+    if (!clip.circular) clip.circular = null;
+  }
   return clip;
 }
 
@@ -2361,6 +2695,58 @@ elements.animDurationValue = document.getElementById('anim-dur-value');
 elements.animTools = document.getElementById('anim-tools');
 elements.animBtns.forEach((btn) => btn.addEventListener('click', handleAnimClick));
 elements.animDuration.addEventListener('input', handleAnimDuration);
+
+elements.shapeTools = document.getElementById('shape-tools');
+elements.circularMask = document.getElementById('circular-mask');
+elements.circularSize = document.getElementById('circular-size');
+elements.circularSizeValue = document.getElementById('circular-size-value');
+
+function circularSizeForPercent(percent) {
+  return clamp((Number(percent) || 100) / 100 * 0.5, 0.1, 0.5);
+}
+
+function percentForCircularSize(size) {
+  return Math.round(((Number(size) || 0.5) / 0.5) * 100);
+}
+
+function updateShapeTools(clip) {
+  const canShape = clip && (clip.kind === 'video' || clip.kind === 'image');
+  elements.shapeTools.hidden = !canShape;
+  if (!canShape) return;
+  const circular = clip.circular || null;
+  elements.circularMask.checked = Boolean(circular);
+  elements.circularSize.disabled = !circular;
+  const percent = circular ? percentForCircularSize(circular.size) : 100;
+  elements.circularSize.value = String(clamp(percent, 20, 100));
+  elements.circularSizeValue.textContent = `${elements.circularSize.value}%`;
+}
+
+function handleCircularMaskChange() {
+  const clip = state.clips.find((item) => item.id === state.selectedId);
+  if (!clip || (clip.kind !== 'video' && clip.kind !== 'image')) return;
+  recordHistory();
+  if (elements.circularMask.checked) {
+    clip.circular = { size: circularSizeForPercent(elements.circularSize.value) };
+  } else {
+    delete clip.circular;
+  }
+  updateShapeTools(clip);
+  setPlayhead(state.playhead);
+  persist();
+}
+
+function handleCircularSizeInput() {
+  const clip = state.clips.find((item) => item.id === state.selectedId);
+  if (!clip || (clip.kind !== 'video' && clip.kind !== 'image') || !clip.circular) return;
+  beginInputEdit();
+  clip.circular.size = circularSizeForPercent(elements.circularSize.value);
+  elements.circularSizeValue.textContent = `${elements.circularSize.value}%`;
+  recordInputEdit();
+  setPlayhead(state.playhead);
+}
+
+elements.circularMask.addEventListener('change', handleCircularMaskChange);
+elements.circularSize.addEventListener('input', handleCircularSizeInput);
 
 function handleColorInput(event) {
   const clip = state.clips.find((item) => item.id === state.selectedId);
@@ -2942,7 +3328,8 @@ async function applyNoiseGate() {
 
 function renderBlurOverlays(time) {
   const active = state.clips.filter((clip) =>
-    clip.kind === 'blur' && time >= clip.start && time < clip.start + clipDuration(clip)
+    clip.kind === 'blur' && time >= clip.start && time < clip.start + clipDuration(clip) &&
+    layerVisible(clip.trackIndex || 0)
   );
   const regions = [];
   active.forEach((clip) => {
@@ -3011,7 +3398,8 @@ function getColorLayer() {
 function renderColorOverlays(time) {
   const layer = getColorLayer();
   const active = state.clips.filter((clip) =>
-    clip.kind === 'color' && time >= clip.start && time < clip.start + clipDuration(clip)
+    clip.kind === 'color' && time >= clip.start && time < clip.start + clipDuration(clip) &&
+    layerVisible(clip.trackIndex || 0)
   );
 
   const activeIds = new Set(active.map((c) => c.id));
@@ -3223,7 +3611,8 @@ function renderTextOverlays(time) {
   const layer = getTextLayer();
   const previewHeight = elements.previewWindow.clientHeight || 1;
   const active = state.clips.filter((clip) =>
-    clip.kind === 'text' && time >= clip.start && time < clip.start + clipDuration(clip)
+    clip.kind === 'text' && time >= clip.start && time < clip.start + clipDuration(clip) &&
+    layerVisible(clip.trackIndex || 0)
   ).sort((a, b) => (a.trackIndex || 0) - (b.trackIndex || 0));
   const boxes = active.map((clip) => {
     clip.text = normalizeText(clip.text);
@@ -3364,7 +3753,8 @@ function getHtmlLayer() {
 function renderHtmlOverlays(time) {
   const layer = getHtmlLayer();
   const active = state.clips.filter((clip) =>
-    clip.kind === 'html' && time >= clip.start && time < clip.start + clipDuration(clip)
+    clip.kind === 'html' && time >= clip.start && time < clip.start + clipDuration(clip) &&
+    layerVisible(clip.trackIndex || 0)
   ).sort((a, b) => (a.trackIndex || 0) - (b.trackIndex || 0));
   const frames = active.map((clip) => {
     clip.html = normalizeHtml(clip.html);
@@ -3415,41 +3805,37 @@ function renderTranscriptOverlay(time) {
   if (state.transcriptionMediaId) {
     const clip = state.clips.find(
       (item) => (item.kind === 'video' || item.kind === 'audio') && item.mediaId === state.transcriptionMediaId &&
-        time >= item.start && time <= item.start + clipDuration(item)
+        time >= item.start && time < item.start + clipDuration(item)
     );
     if (clip) localTime = time - clip.start + clip.trimStart;
     else localTime = -1;
   }
   const wordsPerView = Math.max(1, Math.min(20, Number(elements.transcriptWords.value) || 3));
+  const hideLayer = () => {
+    layer.replaceChildren();
+    layer.hidden = true;
+  };
   if (state.transcriptionWords.length > 0) {
     const words = state.transcriptionWords;
+    if (localTime < 0) return hideLayer();
     let activeIndex = -1;
     for (let i = 0; i < words.length; i += 1) {
-      if (localTime >= words[i].start && localTime < words[i].end) { activeIndex = i; break; }
-      if (localTime >= words[i].end) activeIndex = i;
+      if (words[i].start <= localTime) activeIndex = i;
+      else break;
     }
-    if (activeIndex < 0) {
-      const upcoming = words.findIndex((item) => item.start > localTime);
-      if (upcoming > 0) activeIndex = upcoming - 1;
-      else if (upcoming === 0) activeIndex = 0;
-      else if (upcoming === -1 && localTime > words[words.length - 1].end) activeIndex = words.length - 1;
-    }
-    if (activeIndex >= 0) {
-      const windowStart = Math.max(0, activeIndex - wordsPerView + 1);
-      const visible = words.slice(windowStart, activeIndex + 1).map((item) => item.word);
-      layer.hidden = false;
-      layer.textContent = visible.join(' ');
-      return;
-    }
+    if (activeIndex < 0) return hideLayer();
+    const lastEnd = words[words.length - 1].end;
+    if (localTime > lastEnd + 1.5) return hideLayer();
+    const windowStart = Math.max(0, activeIndex - wordsPerView + 1);
+    const visible = words.slice(windowStart, activeIndex + 1).map((item) => item.word);
+    layer.hidden = false;
+    layer.textContent = visible.join(' ');
+    return;
   }
   const segment = state.transcriptionSegments.find(
     (item) => localTime >= item.start && localTime < item.end
   );
-  if (!segment) {
-    layer.replaceChildren();
-    layer.hidden = true;
-    return;
-  }
+  if (!segment) return hideLayer();
   const words = segment.text.split(/\s+/).filter(Boolean);
   const span = Math.max(0.001, segment.end - segment.start);
   const progress = (localTime - segment.start) / span;
@@ -3564,17 +3950,28 @@ function applyVisualLayout(clip, mediaElement) {
   const visibleHeight = cropHeight * scale;
   const visibleLeft = (frameWidth - visibleWidth) / 2;
   const visibleTop = (frameHeight - visibleHeight) / 2;
-  Object.assign(mediaElement.style, {
-    position: 'absolute',
-    width: `${renderedWidth}px`,
-    height: `${renderedHeight}px`,
-    left: `${visibleLeft - cropLeft}px`,
-    top: `${visibleTop - cropTop}px`,
-    objectFit: 'fill',
-    clipPath: `inset(${crop.top * 100}% ${crop.right * 100}% ${crop.bottom * 100}% ${crop.left * 100}%)`
-  });
+  const offsetX = (Number(clip.posX) || 0) * frameWidth;
+  const offsetY = (Number(clip.posY) || 0) * frameHeight;
+  const circularSize = clip.circular ? clamp(Number(clip.circular.size) || 0.5, 0.1, 0.5) : 0;
+  const clipPath = circularSize > 0
+    ? `circle(${(circularSize * Math.min(renderedWidth, renderedHeight)).toFixed(2)}px at 50% 50%)`
+    : `inset(${crop.top * 100}% ${crop.right * 100}% ${crop.bottom * 100}% ${crop.left * 100}%)`;
+  const cacheKey = [sourceWidth, sourceHeight, frameWidth, frameHeight,
+    crop.left, crop.right, crop.top, crop.bottom, visualScale, offsetX, offsetY, circularSize].join('|');
+  if (mediaElement._layoutCache !== cacheKey) {
+    Object.assign(mediaElement.style, {
+      position: 'absolute',
+      width: `${renderedWidth}px`,
+      height: `${renderedHeight}px`,
+      left: `${visibleLeft - cropLeft + offsetX}px`,
+      top: `${visibleTop - cropTop + offsetY}px`,
+      objectFit: 'fill',
+      clipPath
+    });
+    mediaElement._layoutCache = cacheKey;
+  }
   applyTransitionPreview(clip, mediaElement, state.playhead);
-  updateVisualScaleOverlay(clip, { left: visibleLeft, top: visibleTop, width: visibleWidth, height: visibleHeight });
+  updateVisualScaleOverlay(clip, { left: visibleLeft + offsetX, top: visibleTop + offsetY, width: visibleWidth, height: visibleHeight });
   mediaElement.dataset.clipId = clip.id;
 }
 
@@ -3628,7 +4025,7 @@ function moveVisualScaleDrag(event) {
     drag.historyRecorded = true;
   }
   drag.clip.visualScale = nextScale;
-  applyVisualLayout(drag.clip, drag.clip.kind === 'video' ? elements.preview : elements.imagePreview);
+  applyVisualLayout(drag.clip, visualMediaElement(drag.clip));
   elements.info.textContent = `${describeClip(drag.clip)} · skala ${Math.round(nextScale * 100)}%`;
   event.preventDefault();
 }
@@ -3637,27 +4034,79 @@ function stopVisualScaleDrag(event) {
   if (!state.visualScaleDrag || state.visualScaleDrag.pointerId !== event.pointerId) return;
   state.visualScaleDrag = null;
   persist();
+  updateAutoFitLabel();
+}
+
+function startVisualMoveDrag(event) {
+  if (state.cropActive || state.visualScaleDrag) return;
+  if (event.target.closest('.visual-scale-overlay, .crop-overlay, .text-overlay, .color-block, .html-block, .blur-region')) return;
+  const clipId = event.currentTarget.dataset.clipId;
+  const clip = state.clips.find((item) => item.id === clipId && (item.kind === 'video' || item.kind === 'image'));
+  if (!clip) return;
+  if (state.playhead < clip.start || state.playhead >= clip.start + clipDuration(clip)) return;
+  if (state.selectedId !== clip.id) selectClip(clip.id);
+  const frame = elements.previewWindow.getBoundingClientRect();
+  state.visualMoveDrag = {
+    clip,
+    pointerId: event.pointerId,
+    originX: event.clientX,
+    originY: event.clientY,
+    initialPosX: Number(clip.posX) || 0,
+    initialPosY: Number(clip.posY) || 0,
+    frameWidth: frame.width || 1,
+    frameHeight: frame.height || 1,
+    snapshot: editorSnapshot(),
+    historyRecorded: false
+  };
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function moveVisualMoveDrag(event) {
+  const drag = state.visualMoveDrag;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  const nextX = clamp(drag.initialPosX + (event.clientX - drag.originX) / drag.frameWidth, -1, 1);
+  const nextY = clamp(drag.initialPosY + (event.clientY - drag.originY) / drag.frameHeight, -1, 1);
+  if (nextX === drag.clip.posX && nextY === drag.clip.posY) return;
+  if (!drag.historyRecorded) {
+    pushHistorySnapshot(drag.snapshot);
+    drag.historyRecorded = true;
+  }
+  drag.clip.posX = nextX;
+  drag.clip.posY = nextY;
+  applyVisualLayout(drag.clip, visualMediaElement(drag.clip));
+  event.preventDefault();
+}
+
+function stopVisualMoveDrag(event) {
+  if (!state.visualMoveDrag || state.visualMoveDrag.pointerId !== event.pointerId) return;
+  state.visualMoveDrag = null;
+  persist();
+  updateAutoFitLabel();
 }
 
 function applyTransitionPreview(clip, mediaElement, time) {
-  mediaElement.style.opacity = '';
-  mediaElement.style.transform = '';
+  let opacity = '';
+  let transform = '';
   const transition = clip.transitionIn;
   if (transition && time >= clip.start && time < transition.cut) {
     const progress = clamp((time - clip.start) / transition.duration, 0, 1);
-    if (transition.type === 'dissolve') mediaElement.style.opacity = String(progress);
-    if (transition.type === 'slide-left') mediaElement.style.transform = `translateX(${(1 - progress) * 100}%)`;
-    if (transition.type === 'slide-right') mediaElement.style.transform = `translateX(${(1 - progress) * -100}%)`;
-    if (transition.type === 'slide-up') mediaElement.style.transform = `translateY(${(1 - progress) * 100}%)`;
-    if (transition.type === 'slide-down') mediaElement.style.transform = `translateY(${(1 - progress) * -100}%)`;
+    if (transition.type === 'dissolve') opacity = String(progress);
+    if (transition.type === 'slide-left') transform = `translateX(${(1 - progress) * 100}%)`;
+    if (transition.type === 'slide-right') transform = `translateX(${(1 - progress) * -100}%)`;
+    if (transition.type === 'slide-up') transform = `translateY(${(1 - progress) * 100}%)`;
+    if (transition.type === 'slide-down') transform = `translateY(${(1 - progress) * -100}%)`;
   }
   const anim = clip.animIn;
   if (anim && !transition && time >= clip.start && time < clip.start + anim.duration) {
     const progress = clamp((time - clip.start) / anim.duration, 0, 1);
-    if (anim.type === 'fade') mediaElement.style.opacity = String(progress);
-    if (anim.type === 'scale') mediaElement.style.transform = `scale(${progress})`;
-    if (anim.type === 'slide-up') mediaElement.style.transform = `translateY(${(1 - progress) * 100}%)`;
+    if (anim.type === 'fade') opacity = String(progress);
+    if (anim.type === 'scale') transform = `scale(${progress})`;
+    if (anim.type === 'slide-up') transform = `translateY(${(1 - progress) * 100}%)`;
   }
+  if (mediaElement.style.opacity !== opacity) mediaElement.style.opacity = opacity;
+  if (mediaElement.style.transform !== transform) mediaElement.style.transform = transform;
 }
 
 function refreshPreviewLayout() {
@@ -3672,6 +4121,154 @@ function warmPreview() {
   if (!clip) return;
   showPreview(clip, 0);
 }
+
+function layerVisible(trackIndex) {
+  return !state.hiddenLayers.has(trackIndex);
+}
+
+function syncLayerEye() {
+  state.visualLabelEls.forEach((label, index) => {
+    let eye = label.querySelector('.layer-eye');
+    if (!eye) {
+      eye = document.createElement('button');
+      eye.type = 'button';
+      eye.className = 'layer-eye';
+      eye.setAttribute('aria-label', `Dölj/visa lager ${index + 1}`);
+      eye.title = `Dölj/visa lager ${index + 1}`;
+      eye.textContent = '👁';
+      eye.addEventListener('click', (event) => {
+        event.stopPropagation();
+        toggleLayerVisibility(index);
+      });
+      label.prepend(eye);
+    }
+    eye.classList.toggle('active', layerVisible(index));
+  });
+}
+
+function toggleLayerVisibility(trackIndex) {
+  recordHistory();
+  if (state.hiddenLayers.has(trackIndex)) state.hiddenLayers.delete(trackIndex);
+  else state.hiddenLayers.add(trackIndex);
+  syncLayerEye();
+  renderLayerMedia(state.playhead, state.playing);
+}
+
+function activeVisualLayers(time) {
+  return state.clips
+    .filter((clip) => {
+      if (clip.kind !== 'video' && clip.kind !== 'image') return false;
+      if (!layerVisible(clip.trackIndex || 0)) return false;
+      if (time < clip.start || time >= clip.start + clipDuration(clip)) return false;
+      return true;
+    })
+    .sort((a, b) => (a.trackIndex || 0) - (b.trackIndex || 0));
+}
+
+function layerMediaElement(clip, isTop) {
+  if (isTop) return clip.kind === 'video' ? elements.preview : elements.imagePreview;
+  let element = state.previewLayers.get(clip.id);
+  if (element) return element;
+  element = document.createElement(clip.kind === 'video' ? 'video' : 'img');
+  element.className = `layer-media ${clip.kind === 'video' ? 'layer-video' : 'layer-image'}`;
+  element.preload = 'auto';
+  element.muted = true;
+  element.hidden = true;
+  elements.previewWindow.appendChild(element);
+  state.previewLayers.set(clip.id, element);
+  return element;
+}
+
+function visualMediaElement(clip) {
+  const dynamic = state.previewLayers.get(clip.id);
+  if (dynamic) return dynamic;
+  return clip.kind === 'video' ? elements.preview : elements.imagePreview;
+}
+
+let lastLayerPrune = 0;
+function prunePreviewLayers() {
+  const now = performance.now();
+  if (now - lastLayerPrune < 1000) return;
+  lastLayerPrune = now;
+  for (const [clipId, element] of state.previewLayers) {
+    if (!state.clips.some((clip) => clip.id === clipId)) {
+      element.pause?.();
+      element.remove();
+      state.previewLayers.delete(clipId);
+    }
+  }
+}
+
+function seekVideoElement(element, time) {
+  try { element.currentTime = time; } catch (_error) { /* metadata saknas */ }
+}
+
+function renderLayerMedia(time, playing = false) {
+  const layers = activeVisualLayers(time);
+  if (!state.playing && !elements.preview.paused) elements.preview.pause();
+  elements.preview.hidden = true;
+  elements.imagePreview.hidden = true;
+  if (!layers.length) {
+    for (const element of state.previewLayers.values()) {
+      element.hidden = true;
+      if (element.pause && !element.paused) element.pause();
+    }
+    prunePreviewLayers();
+    elements.placeholder.hidden = false;
+    return;
+  }
+  const top = layers[layers.length - 1];
+  const usedElements = new Set();
+  for (const clip of layers) usedElements.add(layerMediaElement(clip, clip === top));
+  for (const [clipId, element] of state.previewLayers) {
+    if (usedElements.has(element)) continue;
+    element.hidden = true;
+    if (element.pause && !element.paused) element.pause();
+  }
+  prunePreviewLayers();
+  elements.placeholder.hidden = true;
+  for (const clip of layers) {
+    const isTop = clip === top;
+    const element = layerMediaElement(clip, isTop);
+    const url = `/api/media/${encodeURIComponent(clip.mediaId)}/file`;
+    if (element.dataset.mediaId !== clip.mediaId) {
+      element.src = url;
+      element.dataset.mediaId = clip.mediaId;
+    }
+    const zIndex = String(Math.max(0, (clip.trackIndex || 0) * 10));
+    if (element.style.zIndex !== zIndex) element.style.zIndex = zIndex;
+    element.hidden = false;
+    applyVisualLayout(clip, element);
+    if (clip.kind === 'image') continue;
+    const sourceTime = clip.trimStart + time - clip.start;
+    const muted = isTop ? !!clip.muted : true;
+    if (element.muted !== muted) element.muted = muted;
+    const targetTime = clamp(sourceTime, 0, clip.mediaDuration);
+    if (state.playing && playing) {
+      if (element.readyState >= 1) {
+        if (Math.abs((element.currentTime || 0) - targetTime) > 0.4) seekVideoElement(element, targetTime);
+      } else {
+        element.addEventListener('loadedmetadata', () => seekVideoElement(element, targetTime), { once: true });
+      }
+      if (element.paused) element.play().catch(() => {});
+    } else {
+      if (element.readyState >= 1) seekVideoElement(element, targetTime);
+      else element.addEventListener('loadedmetadata', () => seekVideoElement(element, targetTime), { once: true });
+    }
+  }
+}
+
+function refreshPreviewLayout() {
+  if (state.previewLayers.size > 0 || activeVisualLayers(state.playhead).length > 0) {
+    renderLayerMedia(state.playhead, state.playing);
+    return;
+  }
+  const clipId = elements.preview.hidden ? elements.imagePreview.dataset.clipId : elements.preview.dataset.clipId;
+  const clip = state.clips.find((item) => item.id === clipId);
+  if (!clip) return;
+  applyVisualLayout(clip, clip.kind === 'video' ? elements.preview : elements.imagePreview);
+}
+
 
 function showPreview(clip, sourceTime) {
   const url = `/api/media/${encodeURIComponent(clip.mediaId)}/file`;
@@ -3707,6 +4304,11 @@ function clearVisualPreview() {
   elements.imagePreview.hidden = true;
   elements.placeholder.hidden = true;
   elements.visualScaleOverlay.hidden = true;
+  for (const element of state.previewLayers.values()) {
+    element.pause?.();
+    element.remove();
+  }
+  state.previewLayers.clear();
 }
 
 function projectEnd() {
@@ -3756,6 +4358,7 @@ function stopPlayback() {
   if (state.playbackFrame) cancelAnimationFrame(state.playbackFrame);
   state.playbackFrame = null;
   elements.preview.pause();
+  for (const element of state.previewLayers.values()) element.pause?.();
   stopTimelineAudioPlayers();
   elements.togglePlay.querySelector('use').setAttribute('href', '#icon-play');
 }
@@ -3778,6 +4381,7 @@ function maxTrackFor(time, kinds) {
   let max = 0;
   for (const clip of state.clips) {
     if (!kinds.includes(clip.kind)) continue;
+    if (!layerVisible(clip.trackIndex || 0)) continue;
     if (time < clip.start || time >= clip.start + clipDuration(clip)) continue;
     max = Math.max(max, clip.trackIndex || 0);
   }
@@ -3791,20 +4395,8 @@ function setOverlayZ(className, maxTrack) {
 }
 
 function syncPlaybackMedia(time) {
+  renderLayerMedia(time, state.playing);
   const visual = timelineModel.topActiveVisual(state.clips, time);
-  if (visual?.kind === 'image') showImagePreview(visual);
-  if (visual?.kind === 'video') {
-    const sourceTime = visual.trimStart + time - visual.start;
-    const changed = elements.preview.dataset.mediaId !== visual.mediaId;
-    elements.preview.hidden = false;
-    elements.preview.muted = !!visual.muted;
-    elements.imagePreview.hidden = true;
-    elements.placeholder.hidden = true;
-    if (changed) showPreview(visual, sourceTime);
-    if (!changed && Math.abs(elements.preview.currentTime - sourceTime) > 0.4) elements.preview.currentTime = sourceTime;
-    elements.preview.play().catch(() => {});
-  }
-  if (!visual) clearVisualPreview();
   const baseTrack = visual ? (visual.trackIndex || 0) : -1;
   if (elements.imagePreview.style) elements.imagePreview.style.zIndex = String(Math.max(0, baseTrack * 10));
   if (elements.preview.style) elements.preview.style.zIndex = String(Math.max(0, baseTrack * 10));
@@ -3820,6 +4412,7 @@ function syncPlaybackMedia(time) {
   renderColorOverlays(time);
   renderTextOverlays(time);
   renderHtmlOverlays(time);
+  renderTranscriptOverlay(time);
 
   const activeAudio = state.clips.filter((clip) =>
     clip.kind === 'audio' && time >= clip.start && time < clip.start + clipDuration(clip)
@@ -3860,6 +4453,7 @@ function setPlayhead(seconds, updatePreview = true) {
   elements.playhead.style.left = `${secondsToPixels(state.playhead)}px`;
   updatePlayheadFollowIndicator();
   elements.timecode.textContent = formatTime(state.playhead);
+  if (!updatePreview) return;
   const p = state.playhead;
   const base = timelineModel.topActiveVisual(state.clips, p);
   const baseTrack = base ? (base.trackIndex || 0) : -1;
@@ -3874,12 +4468,9 @@ function setPlayhead(seconds, updatePreview = true) {
   renderTextOverlays(state.playhead);
   renderHtmlOverlays(state.playhead);
   renderTranscriptOverlay(state.playhead);
-  if (!updatePreview) return;
   persist();
+  renderLayerMedia(state.playhead, state.playing);
   const visible = timelineModel.topActiveVisual(state.clips, state.playhead);
-  if (visible?.kind === 'video') showPreview(visible, visible.trimStart + state.playhead - visible.start);
-  if (visible?.kind === 'image') showImagePreview(visible);
-  if (!visible) clearVisualPreview();
   if (state.cropActive) {
     if (visible && visible.id === state.selectedId) showCropOverlay();
     else hideCropOverlay();
@@ -4343,6 +4934,7 @@ function handleKeyboardShortcut(event) {
     else if (key === 'x') handled = cutSelectedClip();
     else if (key === 'v') handled = pasteClipboard();
     else if (key === 'd') handled = duplicateSelectedClip();
+    else if (key === 'a') handled = selectAllClips();
     else handled = false;
     if (handled) event.preventDefault();
     return;
@@ -4390,17 +4982,30 @@ async function exportProject(format) {
   elements.cancelExport.hidden = false;
   elements.exportMessage.textContent = 'Skickar tidslinjen till FFmpeg…';
   try {
+    let exportCanvas = state.canvas;
+    let exportClips = state.clips;
+    if (elements.autoFitCanvas.checked) {
+      const fitted = fitProjectToContent();
+      if (fitted) {
+        exportCanvas = fitted.canvas;
+        exportClips = fitted.clips;
+        elements.exportMessage.textContent =
+          `Anpassar format till innehåll (${fitted.canvas.width}×${fitted.canvas.height})…`;
+      }
+    }
     const job = await api('/api/export', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         format: normalizedFormat,
-        canvas: state.canvas,
+        canvas: exportCanvas,
         quality: normalizedFormat === 'mp4' ? Number(elements.exportQuality.value) : null,
         hardware: normalizedFormat === 'mp4' && elements.useNvidia.checked ? 'nvidia' : 'cpu',
         upscale: normalizedFormat === 'mp4' && elements.useUpscale.checked,
-        clips: state.clips.map(({ mediaId, kind, start, trimStart, trimEnd, crop, blur, color, html, text, muted, trackIndex, transitionIn, visualScale, animIn }) => ({
-          mediaId, kind, start, trimStart, trimEnd, crop, blur, color, html, text, muted, trackIndex, transitionIn, visualScale, animIn
+        hiddenLayers: [...state.hiddenLayers],
+        subtitles: normalizedFormat === 'mp4' ? exportSubtitleCues() : null,
+        clips: exportClips.map(({ mediaId, kind, start, trimStart, trimEnd, crop, blur, color, html, text, muted, trackIndex, transitionIn, visualScale, animIn, posX, posY, circular }) => ({
+          mediaId, kind, start, trimStart, trimEnd, crop, blur, color, html, text, muted, trackIndex, transitionIn, visualScale, animIn, posX, posY, circular
         }))
       })
     });
@@ -4517,11 +5122,12 @@ function saveProject() {
     version: 2,
     createdAt: new Date().toISOString(),
     canvas: state.canvas ? { ...state.canvas } : null,
+    hiddenLayers: [...state.hiddenLayers],
     playhead: state.playhead,
     transcriptionMediaId: state.transcriptionMediaId,
     transcriptionSegments: state.transcriptionSegments,
-    clips: state.clips.map(({ mediaId, mediaDuration, sourceWidth, sourceHeight, kind, start, trimStart, trimEnd, crop, blur, text, muted, trackIndex, name, linkGroupId, transitionIn, visualScale, animIn }) =>
-      ({ mediaId, mediaDuration, sourceWidth, sourceHeight, kind, start, trimStart, trimEnd, crop, blur, text, muted, trackIndex, name, linkGroupId, transitionIn, visualScale, animIn })
+    clips: state.clips.map(({ mediaId, mediaDuration, sourceWidth, sourceHeight, kind, start, trimStart, trimEnd, crop, blur, text, muted, trackIndex, name, linkGroupId, transitionIn, visualScale, animIn, posX, posY, circular }) =>
+      ({ mediaId, mediaDuration, sourceWidth, sourceHeight, kind, start, trimStart, trimEnd, crop, blur, text, muted, trackIndex, name, linkGroupId, transitionIn, visualScale, animIn, posX, posY, circular })
     )
   };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -4545,6 +5151,7 @@ async function loadProject() {
     state.transcriptionMediaId = data.transcriptionMediaId || null;
     state.transcriptionSegments = Array.isArray(data.transcriptionSegments) ? data.transcriptionSegments : [];
     rebuildTranscriptionIndex();
+    syncExportSubtitlesPrefill();
     state.clips = timelineModel.compactTrackAssignments(data.clips.map((clip) => {
       if (clip.crop && typeof clip.crop === 'object') clip.crop = { left: clip.crop.left || 0, right: clip.crop.right || 0, top: clip.crop.top || 0, bottom: clip.crop.bottom || 0 };
       if (clip.blur) clip.blur = normalizeBlur(clip.blur);
@@ -4552,6 +5159,7 @@ async function loadProject() {
     }));
     state.selectedId = null;
     state.selectedIds = new Set();
+    state.hiddenLayers = new Set(Array.isArray(data.hiddenLayers) ? data.hiddenLayers.map(Number).filter(Number.isFinite) : []);
     state.canvas = data.canvas && data.canvas.width ? { width: data.canvas.width, height: data.canvas.height } : null;
     syncCanvasControls();
     clearDynamicTracks();
@@ -4562,6 +5170,7 @@ async function loadProject() {
   renderTimelineLinkConnectors();
   renderTranscription();
     selectClip(null);
+    syncLayerEye();
     setPlayhead(data.playhead || 0);
     updateTimelineWidth();
     warmPreview();

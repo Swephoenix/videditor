@@ -1,38 +1,41 @@
 {
   "clips": [
     {
-      "id": "1c1e6661-8b01-45cb-a3e2-ff88e79f7fed",
-      "mediaId": "2af1cf34-d401-467e-8164-d246cc1fbe3a",
-      "name": "We Bought Temu Jet Boats So You Dont Have To.mp4",
+      "id": "1e9ab444-e95e-4d1c-bf5b-dbcba711d00e",
+      "mediaId": "2edaa2b8-4160-4c5c-a66a-f140d0e66f82",
+      "name": "Marina2.mp4",
       "kind": "video",
-      "mediaDuration": 1333.313016,
-      "sourceWidth": 1920,
-      "sourceHeight": 1080,
-      "start": 0,
+      "mediaDuration": 82.88,
+      "sourceWidth": 1254,
+      "sourceHeight": 1254,
+      "start": 0.2,
       "trimStart": 0,
-      "trimEnd": 18.65,
+      "trimEnd": 82.88,
       "crop": {
         "left": 0,
         "right": 0,
         "top": 0,
         "bottom": 0
       },
-      "visualScale": 1,
-      "trackIndex": 0,
+      "visualScale": 0.40576701471192206,
+      "posX": 0.38125,
+      "posY": 0.29259259259259257,
+      "trackIndex": 1,
       "muted": true,
-      "linkGroupId": "f5fcf4e2-33c7-4232-9dd4-a4c905d3a28b"
+      "linkGroupId": "b895f492-2f29-45c0-8f99-494c79247f9c",
+      "circular": null
     },
     {
-      "id": "cd406a80-3f78-4066-a8ee-8a26a4aebd2b",
-      "mediaId": "580dfdc3-1ea5-4a96-8125-d7bf05fe48d2",
-      "name": "We Bought Temu Jet Boats So You Dont Have To_ljud.m4a",
+      "id": "abb6198e-8eaf-48d3-ab74-6f037fc8be34",
+      "mediaId": "4ab3f391-43df-48c3-a060-9605def60495",
+      "name": "Marina2_ljud.m4a",
       "kind": "audio",
-      "mediaDuration": 1333.313016,
+      "mediaDuration": 82.878,
       "sourceWidth": 0,
       "sourceHeight": 0,
-      "start": 0,
+      "start": 0.2,
       "trimStart": 0,
-      "trimEnd": 18.65,
+      "trimEnd": 82.878,
       "crop": {
         "left": 0,
         "right": 0,
@@ -41,15 +44,39 @@
       },
       "muted": false,
       "trackIndex": 0,
-      "linkGroupId": "f5fcf4e2-33c7-4232-9dd4-a4c905d3a28b"
+      "linkGroupId": "b895f492-2f29-45c0-8f99-494c79247f9c"
+    },
+    {
+      "id": "02a516c0-f09b-44cc-8573-bc9e47991b1b",
+      "mediaId": "817036b0-7558-4e9e-99f6-24cc02aa78b0",
+      "name": "image.png",
+      "kind": "image",
+      "mediaDuration": 14400,
+      "sourceWidth": 399,
+      "sourceHeight": 501,
+      "start": 0.2549999999999969,
+      "trimStart": 0,
+      "trimEnd": 53.95,
+      "crop": {
+        "left": 0,
+        "right": 0,
+        "top": 0,
+        "bottom": 0
+      },
+      "visualScale": 1,
+      "posX": 0,
+      "posY": 0,
+      "trackIndex": 0,
+      "circular": null
     }
   ],
-  "selectedId": null,
-  "playhead": 25.775,
+  "selectedId": "02a516c0-f09b-44cc-8573-bc9e47991b1b",
+  "playhead": 66.6005,
   "canvas": {
     "width": 1280,
     "height": 720
   },
   "transcriptionMediaId": null,
-  "transcriptionSegments": []
+  "transcriptionSegments": [],
+  "hiddenLayers": []
 }

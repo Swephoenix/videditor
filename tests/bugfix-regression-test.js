@@ -84,7 +84,12 @@ async function testServerContracts() {
 
   const videoFit = buildVisualSizeFilter({ kind: 'video', visualScale: 1 }, 1920, 1080);
   assert(videoFit.includes('force_original_aspect_ratio=decrease'), 'Videoexporten bevarar inte längre källans bildförhållande.');
-  assert(videoFit.includes('pad=1920:1080') && !videoFit.includes('force_original_aspect_ratio=increase'), 'Videoexporten kan fortfarande tvångszooma och beskära bilden.');
+  assert(!videoFit.includes('force_original_aspect_ratio=increase'), 'Videoexporten kan fortfarande tvångszooma och beskära bilden.');
+  assert(videoFit.includes('pad=1920:1080') && !videoFit.includes('crop=1920:1080'), 'Videoexporten skriver inte ut till exportytan utan onödigt mellansteg.');
+
+  const movedFit = buildVisualSizeFilter({ kind: 'video', visualScale: 1, posX: 0.5, posY: -0.25 }, 1920, 1080);
+  assert(movedFit.includes('(ow-iw)/2+960.0000') && movedFit.includes('(oh-ih)/2+-270.0000'), 'Positionsoffset exporteras inte.');
+  assert(movedFit.includes('crop=1920:1080'), 'Förskjutet klipp saknar beskärning till exportytan.');
 
   const points = [
     { x: 0.1, y: 0.1 }, { x: 0.4, y: 0.1 },

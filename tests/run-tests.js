@@ -25,7 +25,16 @@ const tests = [
   'audio-api-contract-test.js',
   'local-ai-test.js',
   'text-animation-logic-test.js',
-  'text-scale-handle-test.js'
+  'text-scale-handle-test.js',
+  'layers-test.js',
+  'clipboard-paste-test.js',
+  'preview-drag-test.js',
+  'select-all-test.js',
+  'auto-fit-test.js',
+  'circle-mask-test.js',
+  'transcript-overlay-test.js',
+  'subtitles-export-test.js',
+  'canvas-slider-test.js'
 ];
 
 for (const test of tests) {

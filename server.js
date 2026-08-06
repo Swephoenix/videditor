@@ -1198,19 +1198,40 @@ function validateProject(body) {
       ? validateTransitionIn(clip.transitionIn, start, start + trimEnd - trimStart)
       : null;
     const animIn = (kind === 'video' || kind === 'image') ? validateClipAnimation(clip.animIn) : null;
-    return { media, kind, start, trimStart, trimEnd, crop, muted, trackIndex, transitionIn, visualScale, animIn };
+    const posX = (kind === 'video' || kind === 'image') ? clamp(clip.posX ?? 0, -1, 1) : 0;
+    const posY = (kind === 'video' || kind === 'image') ? clamp(clip.posY ?? 0, -1, 1) : 0;
+    const circular = (kind === 'video' || kind === 'image') && clip.circular
+      ? { size: clamp(Number(clip.circular.size) || 0.5, 0.1, 0.5) }
+      : null;
+    return { media, kind, start, trimStart, trimEnd, crop, muted, trackIndex, transitionIn, visualScale, animIn, posX, posY, circular };
   });
   const duration = Math.max(...clips.map((clip) => clip.start + clip.trimEnd - clip.trimStart));
   if (duration > MAX_DURATION) throw badRequest('Projektet är längre än fyra timmar.');
+  const hiddenLayers = Array.isArray(body.hiddenLayers)
+    ? [...new Set(body.hiddenLayers.map(Number).filter((value) => Number.isFinite(value) && value >= 0))]
+    : [];
+  const subtitles = Array.isArray(body.subtitles)
+    ? body.subtitles
+        .slice(0, 2000)
+        .map((cue) => {
+          const start = finiteNumber(cue.start, 'Undertext start', 0, MAX_DURATION);
+          const end = finiteNumber(cue.end, 'Undertext slut', 0, MAX_DURATION + 0.05);
+          const text = String(cue.text || '').slice(0, 500);
+          return { start, end: Math.max(start + 0.05, end), text };
+        })
+        .filter((cue) => cue.text.trim().length > 0)
+    : [];
+  const visibleClips = clips.filter((clip) => clip.kind === 'audio' || !hiddenLayers.includes(clip.trackIndex));
+  const visibleDuration = Math.max(0, ...visibleClips.map((clip) => clip.start + clip.trimEnd - clip.trimStart));
   const hardware = ['auto', 'nvidia', 'cpu'].includes(body.hardware) ? body.hardware : 'auto';
   const upscale = format === 'mp4' && body.upscale === true;
   const quality = format === 'mp4' ? Math.round(clamp(Number(body.quality) || 5, 1, 5)) : null;
-  if (format !== 'mp4' && !clips.some((clip) => clip.media?.hasAudio && !clip.muted)) {
+  if (format !== 'mp4' && !visibleClips.some((clip) => clip.media?.hasAudio && !clip.muted)) {
     throw badRequest('Tidslinjen saknar hörbart ljud att exportera.');
   }
-  const firstVisual = clips.find((clip) => clip.kind === 'video' || clip.kind === 'image');
+  const firstVisual = visibleClips.find((clip) => clip.kind === 'video' || clip.kind === 'image');
   const canvas = validateCanvas(body.canvas, firstVisual?.media.width, firstVisual?.media.height);
-  return { clips, currentDuration: duration, duration: Math.max(duration, 0.1), format, hardware, upscale, canvas, quality };
+  return { clips: visibleClips, hiddenLayers, subtitles, currentDuration: duration, duration: Math.max(visibleDuration, 0.1), format, hardware, upscale, canvas, quality };
 }
 
 function validateBlur(rawBlur) {
@@ -1462,6 +1483,35 @@ function textAnimationExpressions(text, start, end, fontSize) {
   };
 }
 
+function buildSubtitleAss(cues, width, height) {
+  const fontSize = Math.max(14, Math.round(height * 0.045));
+  const outline = Math.max(1, Math.round(fontSize * 0.08));
+  const marginV = Math.max(12, Math.round(height * 0.05));
+  const header = [
+    '[Script Info]',
+    'ScriptType: v4.00+',
+    `PlayResX: ${width}`,
+    `PlayResY: ${height}`,
+    'WrapStyle: 2',
+    'ScaledBorderAndShadow: yes',
+    '',
+    '[V4+ Styles]',
+    'Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding',
+    `Style: Default,DejaVu Sans,${fontSize},&H00FFFFFF,&H00FFFFFF,&H80000000,&H80000000,0,0,0,0,100,100,0,0,1,${outline},1,2,40,40,${marginV},1`,
+    '',
+    '[Events]',
+    'Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text'
+  ];
+  const events = cues.map((cue) => {
+    const safe = String(cue.text)
+      .replace(/\{/g, '(')
+      .replace(/\}/g, ')')
+      .replace(/\r?\n/g, ' ');
+    return `Dialogue: 0,${assTime(cue.start)},${assTime(cue.end)},Default,,0,0,0,,${safe}`;
+  });
+  return [...header, ...events].join('\n');
+}
+
 function assColor(hex, alpha = '00') {
   const normalized = normalizeHex(hex).slice(1);
   return `&H${alpha}${normalized.slice(4, 6)}${normalized.slice(2, 4)}${normalized.slice(0, 2)}`;
@@ -1628,17 +1678,43 @@ function runUpscale(job, inputPath, outputPath) {
   });
 }
 
-function buildVisualSizeFilter(clip, width, height) {
+function buildCircleMaskFilter(size) {
+  const radius = `${clamp(Number(size) || 0.5, 0.1, 0.5).toFixed(4)}*min(W,H)`;
+  const distance = `sqrt((X-W/2)*(X-W/2)+(Y-H/2)*(Y-H/2))`;
+  return `format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':` +
+    `a='if(lte(${distance},${radius}),alpha(X,Y),0)',`;
+}
+
+function buildVisualContentFilter(clip, width, height) {
   const visualScale = Number.isFinite(clip.visualScale) ? clip.visualScale : 1;
-  if (visualScale !== 1) {
-    return `scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
-      `scale=w='trunc(iw*${visualScale.toFixed(6)}/2)*2':` +
-      `h='trunc(ih*${visualScale.toFixed(6)}/2)*2',` +
-      `crop=w='min(iw,${width})':h='min(ih,${height})',` +
-      `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black@0,`;
+  const scaleToCanvas = `scale=${width}:${height}:force_original_aspect_ratio=decrease,`;
+  const zoomSteps = visualScale !== 1
+    ? `scale=w='trunc(iw*${visualScale.toFixed(6)}/2)*2':` +
+      `h='trunc(ih*${visualScale.toFixed(6)}/2)*2',`
+    : '';
+  return scaleToCanvas + zoomSteps;
+}
+
+function buildVisualFrameFilter(clip, width, height) {
+  const posX = Number.isFinite(clip.posX) ? clamp(clip.posX, -1, 1) : 0;
+  const posY = Number.isFinite(clip.posY) ? clamp(clip.posY, -1, 1) : 0;
+  const visualScale = Number.isFinite(clip.visualScale) ? clip.visualScale : 1;
+  if (Math.abs(posX) < 1e-9 && Math.abs(posY) < 1e-9) {
+    const clipOversize = visualScale !== 1
+      ? `crop=w='min(iw,${width})':h='min(ih,${height})',`
+      : '';
+    return `${clipOversize}pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black@0,`;
   }
-  return `scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
-    `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black@0,`;
+  const margin = Math.max(width, height);
+  const offX = (posX * width).toFixed(4);
+  const offY = (posY * height).toFixed(4);
+  return `pad=${width + margin * 2}:${height + margin * 2}:` +
+    `(ow-iw)/2+${offX}:(oh-ih)/2+${offY}:black@0,` +
+    `crop=${width}:${height}:${margin}:${margin},`;
+}
+
+function buildVisualSizeFilter(clip, width, height) {
+  return buildVisualContentFilter(clip, width, height) + buildVisualFrameFilter(clip, width, height);
 }
 
 const WHISPER_VENV = path.join(ROOT, '..', 'whisper', '.venv');
@@ -1973,7 +2049,9 @@ async function renderProject(jobId, project) {
         ? `crop=iw*${cropWidth.toFixed(6)}:ih*${cropHeight.toFixed(6)}:` +
           `iw*${clip.crop.left.toFixed(6)}:ih*${clip.crop.top.toFixed(6)},`
         : '';
-      const sizeFilter = buildVisualSizeFilter(clip, width, height);
+      const circleFilter = clip.circular ? buildCircleMaskFilter(clip.circular.size) : '';
+      const contentFilter = buildVisualContentFilter(clip, width, height);
+      const frameFilter = buildVisualFrameFilter(clip, width, height);
       let animPost = '';
       if (clip.animIn?.type === 'fade') {
         animPost = `format=rgba,fade=t=in:st=${clip.start.toFixed(3)}:` +
@@ -1991,7 +2069,9 @@ async function renderProject(jobId, project) {
         (clip.kind === 'image' ? 'format=rgba,' : '') +
         cropFilter +
         `setpts=PTS-STARTPTS+${clip.start.toFixed(3)}/TB,` +
-        sizeFilter +
+        contentFilter +
+        circleFilter +
+        frameFilter +
         animPost +
         `setsar=1` +
         `[${baseLabel}]`
@@ -2159,6 +2239,16 @@ async function renderProject(jobId, project) {
     textIndex += 1;
   }
 
+  if (project.subtitles && project.subtitles.length > 0) {
+    const subtitleFile = path.join(EXPORT_DIR, `${jobId}-subtitles.ass`);
+    temporaryTextFiles.push(subtitleFile);
+    await fsp.writeFile(subtitleFile, buildSubtitleAss(project.subtitles, width, height), 'utf8');
+    const escapedSubtitleFile = subtitleFile.replace(/'/g, "'\\''");
+    const subtitleLabel = 'subtitleResult';
+    filters.push(`[${videoLabel}]ass=filename='${escapedSubtitleFile}'[${subtitleLabel}]`);
+    videoLabel = subtitleLabel;
+  }
+
   filters.push(`[${videoLabel}]null[vout]`);
 
   if (audios.length === 0) {
@@ -2320,5 +2410,9 @@ module.exports = {
   renderHtmlClipToMedia,
   waveformPeaksFromPcm,
   buildVisualSizeFilter,
+  buildVisualContentFilter,
+  buildVisualFrameFilter,
+  buildCircleMaskFilter,
+  buildSubtitleAss,
   jobs
 };

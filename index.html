@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="dark">
   <title>NVIDIA Video Editor</title>
-  <link rel="stylesheet" href="/styles.css?v=0.15.5">
+  <link rel="stylesheet" href="/styles.css?v=0.17.4">
 </head>
 <body>
   <header class="toolbar">
@@ -19,6 +19,15 @@
     </div>
 
     <button id="import-files" class="toolbar-btn" title="Importera mediafiler">Importera filer</button>
+
+    <label class="layer-picker" title="Vilket lager nästa importerade bild/video läggs på">
+      <span class="layer-picker-label">Lager</span>
+      <select id="import-layer">
+        <option value="auto">Auto</option>
+        <option value="0">Lager 1</option>
+        <option value="1">Lager 2</option>
+      </select>
+    </label>
 
     <div class="menu">
       <button class="menu-toggle" aria-haspopup="true" aria-expanded="false">Redigera ▾</button>
@@ -67,6 +76,12 @@
         </label>
         <label class="hardware menu-item"><input id="use-nvidia" type="checkbox" checked> NVIDIA NVENC</label>
         <label class="hardware menu-item"><input id="use-upscale" type="checkbox"> Snabb AI super-resolution 2×</label>
+        <label class="hardware menu-item" title="Beskär exportytan till den minsta yta som faktiskt används av klippen och bilderna">
+          <input id="auto-fit-canvas" type="checkbox"> Anpassa format till innehåll
+        </label>
+        <label class="hardware menu-item" title="Bränn in transkriberingen som undertexter längst ner i videon">
+          <input id="export-subtitles" type="checkbox"> Exportera undertexter
+        </label>
         <button class="export" id="export">Exportera MP4</button>
         <button id="export-mp3">Exportera ljud som MP3</button>
         <button id="export-wav">Exportera ljud som WAV</button>
@@ -172,6 +187,18 @@
           <label class="anim-dur-label">Längd
             <output id="anim-dur-value">0.5 s</output>
             <input id="anim-duration" type="range" min="0.1" max="3" step="0.1" value="0.5">
+          </label>
+        </div>
+      </section>
+      <section id="shape-tools" class="shape-tools" aria-label="Form på markerat klipp" hidden>
+        <div class="crop-heading">
+          <strong>Form</strong>
+        </div>
+        <div class="shape-grid">
+          <label class="shape-toggle"><input id="circular-mask" type="checkbox"> Cirkulär mask</label>
+          <label>Cirkelstorlek
+            <output id="circular-size-value">100%</output>
+            <input id="circular-size" type="range" min="20" max="100" step="1" value="100">
           </label>
         </div>
       </section>
@@ -285,12 +312,14 @@
     </aside>
   </div>
   <div class="quick-tools" id="quick-tools">
+    <div class="quick-tools-row">
+    <span class="quick-tool-spacer" aria-hidden="true"></span>
+    <div class="quick-tools-center">
     <div class="transport-controls">
       <button id="toggle-play" class="play-control" aria-keyshortcuts="Space" title="Spela eller pausa (Space)">
         <svg width="20" height="20" aria-hidden="true"><use href="#icon-play"></use></svg>
       </button>
     </div>
-    <div class="quick-tools-row">
     <button class="quick-tool" id="qt-blur" title="Lägg till blur (B)">
       <svg width="20" height="20" aria-hidden="true"><use href="#icon-blur"></use></svg>
       <span>Blur</span>
@@ -324,9 +353,26 @@
       <span>Övergång</span>
     </button>
     <button class="quick-tool" id="qt-link" title="Länka markerat video- och ljudklipp" disabled>
-      <img class="chain-tool-icon" src="/chain.svg?v=0.15.5" alt="" aria-hidden="true">
+      <img class="chain-tool-icon" src="/chain.svg?v=0.17.4" alt="" aria-hidden="true">
       <span>Länka</span>
     </button>
+    </div>
+    <button class="quick-tool canvas-tool" id="qt-canvas" title="Exportytans storlek (bredd/höjd)" aria-haspopup="true" aria-expanded="false">
+      <svg width="20" height="20" aria-hidden="true"><use href="#icon-canvas"></use></svg>
+      <span>Yta</span>
+    </button>
+  </div>
+  <div id="canvas-size-popover" class="canvas-size-popover" hidden>
+    <strong>Exportytans storlek</strong>
+    <label class="canvas-slider-label">Bredd
+      <output id="canvas-width-value">1920</output>
+      <input id="canvas-width-slider" type="range" min="64" max="4096" step="16" value="1920">
+    </label>
+    <label class="canvas-slider-label">Höjd
+      <output id="canvas-height-value">1080</output>
+      <input id="canvas-height-slider" type="range" min="64" max="4096" step="16" value="1080">
+    </label>
+    <p class="canvas-size-hint">Format: <span id="canvas-size-summary">16:9 · 1920×1080</span></p>
   </div>
 </div>
 </div>
@@ -375,6 +421,12 @@
     </symbol>
     <symbol id="icon-play" viewBox="0 0 24 24">
       <path fill="currentColor" d="M8 5.14v14.72a1 1 0 0 0 1.5.86l11-7.36a1 1 0 0 0 0-1.72l-11-7.36A1 1 0 0 0 8 5.14Z"/>
+    </symbol>
+    <symbol id="icon-canvas" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="4" width="18" height="16" rx="2"/>
+        <rect x="7.5" y="8" width="9" height="8" rx="1" opacity=".6"/>
+      </g>
     </symbol>
     <symbol id="icon-pause" viewBox="0 0 24 24">
       <rect fill="currentColor" x="6" y="4" width="4" height="16" rx="1"/>
@@ -493,7 +545,7 @@
     </div>
   </div>
 
-  <script src="/timeline-model.js?v=0.15.5" defer></script>
-  <script src="/app.js?v=0.15.5" defer></script>
+  <script src="/timeline-model.js?v=0.17.4" defer></script>
+  <script src="/app.js?v=0.17.4" defer></script>
 </body>
 </html>
