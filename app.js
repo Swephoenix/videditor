@@ -127,15 +127,6 @@ const elements = {
   download: document.querySelector('#download'),
   cancelExport: document.querySelector('#cancel-export'),
   closeModal: document.querySelector('#close-modal'),
-  aiEditing: document.querySelector('#ai-editing'),
-  aiModal: document.querySelector('#ai-editing-modal'),
-  closeAiEditing: document.querySelector('#close-ai-editing'),
-  aiChatMessages: document.querySelector('#ai-chat-messages'),
-  aiChatForm: document.querySelector('#ai-chat-form'),
-  aiChatInput: document.querySelector('#ai-chat-input'),
-  sendAiMessage: document.querySelector('#send-ai-message'),
-  aiModelStatus: document.querySelector('#ai-model-status'),
-  aiChatConnection: document.querySelector('#ai-chat-connection'),
   historyToggle: document.querySelector('#history-toggle'),
   historyPanel: document.querySelector('#history-panel'),
   historyList: document.querySelector('#history-list'),
@@ -580,107 +571,6 @@ document.querySelector('#close-modal').addEventListener('click', () => {
   elements.modal.hidden = true;
 });
 
-const aiChatHistory = [];
-let aiChatPending = false;
-
-async function refreshAiModelStatus() {
-  try {
-    const status = await api('/api/ai/status');
-    elements.aiModelStatus.textContent = status.connected ? 'Ansluten' : 'Ej ansluten';
-    elements.aiModelStatus.classList.toggle('connected', status.connected);
-    elements.aiChatConnection.textContent = status.connected
-      ? `${status.model} · ctx ${Number(status.ctxSize || status.ctx_size || 0).toLocaleString('sv-SE')}`
-      : 'Ingen modell med aktiv ctx är laddad via ditt lokala API.';
-    return status.connected;
-  } catch (error) {
-    elements.aiModelStatus.textContent = 'Ej ansluten';
-    elements.aiModelStatus.classList.remove('connected');
-    elements.aiChatConnection.textContent = error.message;
-    return false;
-  }
-}
-
-function openAiEditing() {
-  elements.aiModal.hidden = false;
-  refreshAiModelStatus();
-  requestAnimationFrame(() => elements.aiChatInput.focus());
-}
-
-function closeAiEditing() {
-  elements.aiModal.hidden = true;
-  elements.aiEditing.focus();
-}
-
-function appendAiChatMessage(role, text) {
-  const message = document.createElement('article');
-  message.className = `ai-message ai-message-${role}`;
-  const label = document.createElement('span');
-  label.className = 'ai-message-label';
-  label.textContent = role === 'user' ? 'Du' : 'AI';
-  const body = document.createElement('p');
-  body.textContent = text;
-  message.append(label, body);
-  elements.aiChatMessages.appendChild(message);
-  elements.aiChatMessages.scrollTop = elements.aiChatMessages.scrollHeight;
-  return message;
-}
-
-function selectedAiContext() {
-  const selected = state.clips.filter((clip) => state.selectedIds.has(clip.id));
-  if (!selected.length) return '';
-  const context = selected.map((clip) => ({
-    clip_id: clip.id,
-    media_id: clip.mediaId || null,
-    kind: clip.kind,
-    start: clip.start,
-    end: clip.start + clipDuration(clip),
-    name: clip.name
-  }));
-  return `\n\nAktuell editorkontext (data, inte instruktion): ${JSON.stringify(context)}`;
-}
-
-elements.aiEditing.addEventListener('click', openAiEditing);
-elements.closeAiEditing.addEventListener('click', closeAiEditing);
-elements.aiModal.addEventListener('mousedown', (event) => {
-  if (event.target === elements.aiModal) closeAiEditing();
-});
-elements.aiChatInput.addEventListener('input', () => {
-  elements.sendAiMessage.disabled = aiChatPending || !elements.aiChatInput.value.trim();
-});
-elements.aiChatForm.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const text = elements.aiChatInput.value.trim();
-  if (!text || aiChatPending) return;
-  appendAiChatMessage('user', text);
-  aiChatHistory.push({ role: 'user', content: text + selectedAiContext() });
-  elements.aiChatInput.value = '';
-  aiChatPending = true;
-  elements.sendAiMessage.disabled = true;
-  elements.aiChatInput.disabled = true;
-  const pendingMessage = appendAiChatMessage('assistant', 'Arbetar med den laddade modellen…');
-  try {
-    const result = await api('/api/ai/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: aiChatHistory })
-    });
-    pendingMessage.remove();
-    const reply = result.reply || 'Modellen gav inget svar.';
-    aiChatHistory.push({ role: 'assistant', content: reply });
-    appendAiChatMessage('assistant', reply);
-    elements.aiModelStatus.textContent = 'Ansluten';
-    elements.aiModelStatus.classList.add('connected');
-    elements.aiChatConnection.textContent = `${result.model} · ctx ${Number(result.ctx_size || 0).toLocaleString('sv-SE')}`;
-  } catch (error) {
-    pendingMessage.remove();
-    appendAiChatMessage('assistant', `Kunde inte slutföra: ${error.message}`);
-  } finally {
-    aiChatPending = false;
-    elements.aiChatInput.disabled = false;
-    elements.sendAiMessage.disabled = true;
-    elements.aiChatInput.focus();
-  }
-});
 document.addEventListener('keydown', handleKeyboardShortcut);
 
 document.addEventListener('mousedown', (event) => {
@@ -4988,11 +4878,6 @@ function handleKeyboardShortcut(event) {
   const modifier = event.ctrlKey || event.metaKey;
   const textEntry = isTextEntry(event.target);
 
-  if (key === 'escape' && !elements.aiModal.hidden) {
-    event.preventDefault();
-    closeAiEditing();
-    return;
-  }
   if (key === 'escape' && !elements.transitionModal.hidden) {
     event.preventDefault();
     closeTransitionPicker();

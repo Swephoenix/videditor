@@ -23,7 +23,6 @@ const tests = [
   'audio-integrity-test.js',
   'audio-tools-test.js',
   'audio-api-contract-test.js',
-  'local-ai-test.js',
   'text-animation-logic-test.js',
   'text-scale-handle-test.js',
   'layers-test.js',

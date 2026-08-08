@@ -22,10 +22,6 @@ const {
   searchAnalysis,
   speechEventsFromSilence
 } = require('./audio-tools');
-const {
-  validateAiChatRequest,
-  buildModelRequest
-} = require('./local-ai');
 
 const ROOT = __dirname;
 const UPLOAD_DIR = path.join(ROOT, 'uploads');
@@ -36,7 +32,6 @@ const REALESRGAN_SCRIPT = path.join(ROOT, 'upscale_realesrgan.py');
 const REALESRGAN_FAST_MODEL = path.join(ROOT, 'models', 'realesr-general-x4v3.pth');
 const REALESRGAN_QUALITY_MODEL = path.join(ROOT, 'models', 'RealESRGAN_x4plus.pth');
 const PORT = Number(process.env.PORT) || 3000;
-const LOCAL_MODEL_API = process.env.LOCAL_MODEL_API || 'http://127.0.0.1:8092';
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024;
 const MAX_CLIPS = 200;
 const MAX_BLUR_BOXES = 20;
@@ -44,7 +39,6 @@ const MAX_DURATION = 4 * 60 * 60;
 const MAX_AUDIO_ANALYSES = 200;
 const MAX_AUDIO_TASKS = 2;
 const AUDIO_TASK_TIMEOUT_MS = 30 * 60 * 1000;
-const MODEL_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tif', '.tiff', '.svg']);
 const ALLOWED_EXTENSIONS = new Set([
   '.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v',
@@ -172,127 +166,6 @@ function requireAudioMedia(id) {
   const filePath = path.resolve(UPLOAD_DIR, item.storedName);
   if (path.dirname(filePath) !== path.resolve(UPLOAD_DIR)) throw badRequest('Mediefilens sökväg är ogiltig.');
   return { item, filePath };
-}
-
-function localModelUrl(endpoint) {
-  const base = new URL(LOCAL_MODEL_API);
-  const loopback = base.hostname === '127.0.0.1' || base.hostname === 'localhost' || base.hostname === '::1';
-  if (!loopback || !['http:', 'https:'].includes(base.protocol) || base.username || base.password) {
-    throw new Error('LOCAL_MODEL_API måste vara en lokal HTTP-adress utan inloggningsuppgifter.');
-  }
-  return new URL(endpoint, `${base.toString().replace(/\/+$/, '')}/`).toString();
-}
-
-async function fetchJson(url, options = {}, timeoutMs = 10_000) {
-  const response = await fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
-  const text = await response.text();
-  let body;
-  try {
-    body = text ? JSON.parse(text) : {};
-  } catch (_error) {
-    throw new Error(`Det lokala API:t returnerade ogiltig JSON (HTTP ${response.status}).`);
-  }
-  return { response, body };
-}
-
-async function loadedModelStatus() {
-  const { response, body } = await fetchJson(localModelUrl('/models/status'));
-  if (!response.ok) throw new Error(body.detail || body.error || `Modellstatus misslyckades (HTTP ${response.status}).`);
-  return {
-    model: typeof body.model === 'string' ? body.model : '',
-    alive: body.alive === true,
-    ctxSize: Number.isFinite(Number(body.ctx_size)) ? Number(body.ctx_size) : 0,
-    visionEnabled: body.vision_enabled === true
-  };
-}
-
-const AI_AUDIO_TOOL_ROUTES = new Map([
-  ['analyze_audio', '/api/audio/analyze'],
-  ['align_transcript', '/api/audio/align'],
-  ['search_audio', '/api/audio/search'],
-  ['process_audio_range', '/api/audio/process-range'],
-  ['master_podcast', '/api/audio/master']
-]);
-
-async function executeAiAudioTool(name, args) {
-  const route = AI_AUDIO_TOOL_ROUTES.get(name);
-  if (!route) return { ok: false, error: 'Verktyget är inte tillåtet.' };
-  const { response, body } = await fetchJson(`http://127.0.0.1:${PORT}${route}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(args)
-  }, AUDIO_TASK_TIMEOUT_MS);
-  return response.ok
-    ? { ok: true, status: response.status, result: body }
-    : { ok: false, status: response.status, error: body.error || 'Verktyget misslyckades.' };
-}
-
-async function runLocalAiChat(messages) {
-  const status = await loadedModelStatus();
-  if (!status.model || !status.alive) {
-    const error = new Error('Ingen modell med aktiv ctx är laddad via ditt lokala API.');
-    error.status = 503;
-    throw error;
-  }
-  const conversation = [...messages];
-  const actions = [];
-  let usage = null;
-  for (let step = 0; step < 5; step += 1) {
-    const { response, body } = await fetchJson(localModelUrl('/v1/chat/completions'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(buildModelRequest(conversation))
-    }, MODEL_REQUEST_TIMEOUT_MS);
-    if (!response.ok) {
-      const message = body.detail || body.error?.message || body.error || `Modellanrop misslyckades (HTTP ${response.status}).`;
-      throw new Error(typeof message === 'string' ? message : JSON.stringify(message));
-    }
-    const modelMessage = body.choices?.[0]?.message;
-    if (!modelMessage || typeof modelMessage !== 'object') throw new Error('Modell-API:t returnerade inget giltigt chattsvar.');
-    usage = body.usage || usage;
-    const toolCalls = Array.isArray(modelMessage.tool_calls) ? modelMessage.tool_calls.slice(0, 5) : [];
-    if (!toolCalls.length) {
-      const reply = typeof modelMessage.content === 'string' ? modelMessage.content.trim() : '';
-      return {
-        reply: reply || (actions.length ? 'Verktygen slutfördes, men modellen gav ingen sammanfattning.' : 'Modellen gav inget slutsvar.'),
-        model: status.model,
-        ctx_size: status.ctxSize,
-        vision_enabled: status.visionEnabled,
-        actions,
-        usage
-      };
-    }
-    conversation.push({
-      role: 'assistant',
-      content: typeof modelMessage.content === 'string' ? modelMessage.content : '',
-      tool_calls: toolCalls
-    });
-    for (const call of toolCalls) {
-      const name = call?.function?.name || '';
-      let args;
-      try {
-        args = JSON.parse(call?.function?.arguments || '{}');
-      } catch (_error) {
-        args = {};
-      }
-      const result = await executeAiAudioTool(name, args);
-      actions.push({ tool: name, arguments: args, ok: result.ok, status: result.status || null });
-      conversation.push({
-        role: 'tool',
-        tool_call_id: call.id,
-        name,
-        content: JSON.stringify(result).slice(0, 50_000)
-      });
-    }
-  }
-  return {
-    reply: 'Maximalt antal verktygssteg nåddes. Kontrollera resultatet innan du fortsätter.',
-    model: status.model,
-    ctx_size: status.ctxSize,
-    vision_enabled: status.visionEnabled,
-    actions,
-    usage
-  };
 }
 
 function flattenTranscriptionWords(item) {
@@ -494,40 +367,14 @@ app.use('/api/audio', (request, response, next) => {
   if (!loopback) return response.status(403).json({ error: 'Ljudverktygen är endast tillgängliga lokalt.' });
   next();
 });
-app.use('/api/ai', (request, response, next) => {
-  const address = request.socket.remoteAddress || '';
-  const loopback = address === '::1' || address === '127.0.0.1' || address.startsWith('::ffff:127.');
-  if (!loopback) return response.status(403).json({ error: 'AI-chatten är endast tillgänglig lokalt.' });
-  next();
-});
 
 app.get('/api/status', async (_request, response) => {
   response.json({
     ffmpeg: true,
     nvenc: await hasWorkingNvenc(),
     audioApi: true,
-    localModelApi: LOCAL_MODEL_API,
     version: '0.10.1'
   });
-});
-
-app.get('/api/ai/status', async (_request, response, next) => {
-  try {
-    const status = await loadedModelStatus();
-    response.json({ connected: Boolean(status.model && status.alive), ...status });
-  } catch (error) {
-    error.status = 503;
-    next(error);
-  }
-});
-
-app.post('/api/ai/chat', async (request, response, next) => {
-  try {
-    const input = validateAiChatRequest(request.body);
-    response.json(await runLocalAiChat(input.messages));
-  } catch (error) {
-    next(error);
-  }
 });
 
 app.get('/api/media', (_request, response) => response.json([...mediaLibrary.values()]));
@@ -1685,7 +1532,7 @@ function buildCircleMaskFilter(size) {
     `a='if(lte(${distance},${radius}),alpha(X,Y),0)',`;
 }
 
-async function generateCircleMask(maskPath, clip, width, height) {
+function buildCircleMaskGraph(clip, width, height, length) {
   const size = clamp(Number(clip.circular.size) || 0.5, 0.1, 0.5);
   const radius = `${size.toFixed(4)}*min(W,H)`;
   const distance = `sqrt((X-W/2)*(X-W/2)+(Y-H/2)*(Y-H/2))`;
@@ -1694,17 +1541,14 @@ async function generateCircleMask(maskPath, clip, width, height) {
   const crop = clip.crop || { left: 0, right: 0, top: 0, bottom: 0 };
   const cw = Math.max(2, Math.round(sW * (1 - crop.left - crop.right)));
   const ch = Math.max(2, Math.round(sH * (1 - crop.top - crop.bottom)));
-  const visualScale = Number.isFinite(clip.visualScale) ? clip.visualScale : 1;
-  const zoom = visualScale !== 1
-    ? `scale=w='trunc(iw*${visualScale.toFixed(6)}/2)*2':h='trunc(ih*${visualScale.toFixed(6)}/2)*2',`
-    : '';
-  const args = ['-hide_banner', '-y',
-    '-f', 'lavfi', '-i', `color=c=white:s=${cw}x${ch}:r=1:d=1`,
-    '-vf',
-    `scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
-    `${zoom}format=gray,geq=lum='if(lte(${distance},${radius}),255,0)'`,
-    '-frames:v', '1', maskPath];
-  await runProcess('ffmpeg', args);
+  const frames = Math.ceil(Math.max(0, length) * 30) + 60;
+  return {
+    graph: `color=c=white:s=${cw}x${ch}:r=1:d=1,` +
+      buildVisualContentFilter(clip, width, height) +
+      `format=gray,geq=lum='if(lte(${distance},${radius}),255,0)',` +
+      `loop=loop=${frames}:size=1:start=0,fps=30[mask${clip._renderIndex}];`,
+    label: `[vcirc${clip._renderIndex}][mask${clip._renderIndex}]alphamerge,`
+  };
 }
 
 function buildVisualContentFilter(clip, width, height) {
@@ -2037,20 +1881,6 @@ async function renderProject(jobId, project) {
     clip._htmlBlockHeight = blockHeight;
     htmlIndex += 1;
   }
-  const circleClips = project.clips.filter((clip) =>
-    (clip.kind === 'video' || clip.kind === 'image') && clip.circular
-  );
-  for (const clip of circleClips) {
-    const maskPath = path.join(EXPORT_DIR, `${jobId}-mask-${inputIndex}.png`);
-    try {
-      await generateCircleMask(maskPath, clip, width, height);
-      clip._circleMaskPath = maskPath;
-      tempPngs.push(maskPath);
-    } catch (error) {
-      console.warn(`Cirkelmask kunde inte genereras för ${clip.media?.storedName}: ${error.message}`);
-      clip._circleMaskPath = null;
-    }
-  }
   if (htmlClips.length > 0) {
     job.phase = 'encode';
     job.phaseStartedAt = new Date().toISOString();
@@ -2069,13 +1899,6 @@ async function renderProject(jobId, project) {
     inputIndex += 1;
     args.push('-framerate', '30', '-start_number', '1', '-i', path.join(clip._htmlFramesDir, 'frame-%04d.png'));
   }
-  for (const clip of project.clips) {
-    if (clip._circleMaskPath) {
-      clip._circleMaskInputIndex = inputIndex;
-      inputIndex += 1;
-      args.push('-loop', '1', '-framerate', '30', '-i', clip._circleMaskPath);
-    }
-  }
   const filters = [`color=c=black:s=${width}x${height}:r=30:d=${project.duration.toFixed(3)}[base]`];
   const videos = [];
   const audios = [];
@@ -2093,9 +1916,11 @@ async function renderProject(jobId, project) {
           `iw*${clip.crop.left.toFixed(6)}:ih*${clip.crop.top.toFixed(6)},`
         : '';
       const circleFilter = clip.circular
-        ? (clip._circleMaskPath
-            ? `format=rgba,[${clip._circleMaskInputIndex}:v]alphamerge,`
-            : buildCircleMaskFilter(clip.circular.size))
+        ? (() => {
+            clip._renderIndex = index;
+            const mask = buildCircleMaskGraph(clip, width, height, length);
+            return `format=rgba[vcirc${index}];${mask.graph}${mask.label}`;
+          })()
         : '';
       const contentFilter = buildVisualContentFilter(clip, width, height);
       const frameFilter = buildVisualFrameFilter(clip, width, height);
@@ -2460,6 +2285,7 @@ module.exports = {
   buildVisualContentFilter,
   buildVisualFrameFilter,
   buildCircleMaskFilter,
+  buildCircleMaskGraph,
   buildSubtitleAss,
   jobs
 };

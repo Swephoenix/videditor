@@ -6,7 +6,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check audio-tools.js && node --check local-ai.js && node --check timeline-model.js && node --check app.js",
+    "check": "node --check server.js && node --check audio-tools.js && node --check timeline-model.js && node --check app.js",
     "test": "node tests/run-tests.js"
   },
   "engines": {

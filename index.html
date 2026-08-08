@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="dark">
   <title>NVIDIA Video Editor</title>
-  <link rel="stylesheet" href="/styles.css?v=0.17.6">
+  <link rel="stylesheet" href="/styles.css?v=0.17.7">
 </head>
 <body>
   <header class="toolbar">
@@ -87,14 +87,6 @@
         <button id="export-wav">Exportera ljud som WAV</button>
       </div>
     </div>
-
-    <button id="ai-editing" class="ai-editing-button" type="button" aria-haspopup="dialog" aria-controls="ai-editing-modal">
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M12 2.8c.7 4.8 3.4 7.5 8.2 8.2-4.8.7-7.5 3.4-8.2 8.2-.7-4.8-3.4-7.5-8.2-8.2C8.6 10.3 11.3 7.6 12 2.8Z"/>
-        <path d="M19 2.5c.2 1.4 1.1 2.3 2.5 2.5-1.4.2-2.3 1.1-2.5 2.5-.2-1.4-1.1-2.3-2.5-2.5 1.4-.2 2.3-1.1 2.5-2.5Z"/>
-      </svg>
-      AI-redigering
-    </button>
 
     <span id="status" class="status">Ansluter…</span>
 
@@ -353,7 +345,7 @@
       <span>Övergång</span>
     </button>
     <button class="quick-tool" id="qt-link" title="Länka markerat video- och ljudklipp" disabled>
-      <img class="chain-tool-icon" src="/chain.svg?v=0.17.6" alt="" aria-hidden="true">
+      <img class="chain-tool-icon" src="/chain.svg?v=0.17.7" alt="" aria-hidden="true">
       <span>Länka</span>
     </button>
     </div>
@@ -468,37 +460,6 @@
     <button id="separate-from-audio" type="button" role="menuitem" hidden>Separera från ljud</button>
   </div>
 
-  <div id="ai-editing-modal" class="modal ai-modal" role="dialog" aria-modal="true" aria-labelledby="ai-editing-title" hidden>
-    <section class="ai-chat-card">
-      <header class="ai-chat-header">
-        <div>
-          <div class="ai-chat-heading-row">
-            <h2 id="ai-editing-title">AI-redigering</h2>
-            <span id="ai-model-status" class="ai-placeholder-badge">Kontrollerar…</span>
-          </div>
-          <p>Beskriv hur du vill ändra projektet.</p>
-        </div>
-        <button id="close-ai-editing" class="ai-chat-close" type="button" aria-label="Stäng AI-redigering">×</button>
-      </header>
-
-      <div id="ai-chat-messages" class="ai-chat-messages" role="log" aria-live="polite" aria-relevant="additions">
-        <article class="ai-message ai-message-assistant">
-          <span class="ai-message-label">AI</span>
-          <p>Hej. Här kommer du senare kunna be mig klippa, flytta och förbättra materialet på tidslinjen.</p>
-        </article>
-      </div>
-
-      <form id="ai-chat-form" class="ai-chat-composer">
-        <label for="ai-chat-input">Meddelande</label>
-        <textarea id="ai-chat-input" rows="3" placeholder="Exempel: Ta bort tystnaden och lägg en rubrik i början"></textarea>
-        <div class="ai-chat-composer-footer">
-          <small id="ai-chat-connection">Använder modellen och ctx som är laddad via ditt lokala API.</small>
-          <button id="send-ai-message" type="submit" disabled>Skicka</button>
-        </div>
-      </form>
-    </section>
-  </div>
-
   <div id="export-modal" class="modal" hidden>
     <div class="modal-card">
       <h2 id="export-title">Exporterar MP4</h2>
@@ -545,7 +506,7 @@
     </div>
   </div>
 
-  <script src="/timeline-model.js?v=0.17.6" defer></script>
-  <script src="/app.js?v=0.17.6" defer></script>
+  <script src="/timeline-model.js?v=0.17.7" defer></script>
+  <script src="/app.js?v=0.17.7" defer></script>
 </body>
 </html>
