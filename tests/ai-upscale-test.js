@@ -12,6 +12,7 @@ const MODEL = path.join(ROOT, 'models', 'realesr-general-x4v3.pth');
 const PYTHON_CANDIDATES = [
   process.env.REALESRGAN_PYTHON,
   path.join(ROOT, '.venv', 'bin', 'python'),
+  path.join(ROOT, '..', 'pytorch-cuda', 'venv', 'bin', 'python'),
   path.join(ROOT, '..', 'venv', 'bin', 'python')
 ].filter(Boolean);
 

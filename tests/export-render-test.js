@@ -33,8 +33,9 @@ async function waitForJob(job, timeoutMilliseconds = 20000) {
 (async () => {
   execFileSync('ffmpeg', [
     '-hide_banner', '-loglevel', 'error', '-y',
-    '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30:duration=1.2',
-    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', fixturePath
+    '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=25:duration=1.2',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=1.2',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', fixturePath
   ]);
 
   const media = {
@@ -44,7 +45,9 @@ async function waitForJob(job, timeoutMilliseconds = 20000) {
     height: 180,
     duration: 1.2,
     hasVideo: true,
-    hasAudio: false
+    hasAudio: true,
+    videoCodec: 'h264',
+    frameRate: 25
   };
   const textClips = [
     {
@@ -136,6 +139,15 @@ async function waitForJob(job, timeoutMilliseconds = 20000) {
         visualScale: 1.2,
         transitionIn: { type: 'dissolve', duration: 0.4, cut: 0.8 }
       },
+      {
+        media,
+        kind: 'audio',
+        start: 0.2,
+        trimStart: 0.2,
+        trimEnd: 1.2,
+        muted: false,
+        trackIndex: 0
+      },
       { media: null, kind: 'blur', start: 0, trimStart: 0, trimEnd: 1.2, blur },
       ...textClips
     ]
@@ -147,6 +159,13 @@ async function waitForJob(job, timeoutMilliseconds = 20000) {
   await waitForJob(job);
   assert(job.status === 'completed', job.error || `Oväntad jobbstatus: ${job.status}`);
   assert((await fsp.stat(outputPath)).size > 1000, 'Exportfilen är tom.');
+  assert(job.encoder.includes('CUDA/NVDEC') && job.encoder.includes('NVENC'), 'Exportjobbet använde inte NVIDIA GPU-vägen.');
+
+  const exportedFrameRate = execFileSync('ffprobe', [
+    '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=avg_frame_rate',
+    '-of', 'default=noprint_wrappers=1:nokey=1', outputPath
+  ], { encoding: 'utf8' }).trim();
+  assert(exportedFrameRate === '25/1', `Exporten följde inte källans 25 fps: ${exportedFrameRate}`);
 
   const signalOutput = execFileSync('ffmpeg', [
     '-hide_banner', '-loglevel', 'error', '-i', outputPath,

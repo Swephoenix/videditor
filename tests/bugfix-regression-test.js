@@ -63,6 +63,7 @@ function makeWindow(confirmAnswers = [], customFetch = null) {
       applyTransition, removeSelectedTransition, applyVisualLayout,
       startVisualScaleDrag, moveVisualScaleDrag, stopVisualScaleDrag,
       rebuildTrackLayout, editorHistory, updatePlayheadFollowIndicator, unlinkClipPair,
+      renderTimelineLinkConnectors,
       selectClips, toggleSelectedLink
     };
   `);
@@ -133,6 +134,24 @@ async function testDeleteUndo() {
   window.__test.removeSelectedClip();
   window.__test.undoEdit();
   assert(window.__test.state.clips.length === 1, 'Delete återställdes inte med ett enda undo.');
+}
+
+async function testTextCanBeEditedImmediately() {
+  const window = makeWindow();
+  window.document.querySelector('#add-text').click();
+  const clip = window.__test.state.clips[0];
+  const simplePanel = window.document.querySelector('.preset-panel[data-preset="simple"]');
+  const input = simplePanel.querySelector('[data-property="text"]');
+  assert(clip.text.presetId === 'simple', 'Ett nytt textklipp saknar en redigerbar standardmall.');
+  assert(simplePanel.style.display !== 'none', 'Skrivfältet visas inte direkt när ett textklipp skapas.');
+
+  input.value = 'Ny synlig text';
+  input.dispatchEvent(new window.Event('input', { bubbles: true }));
+  assert(clip.text.text === 'Ny synlig text', 'Textinmatningen uppdaterade inte klippets data.');
+  assert(
+    window.document.querySelector('.text-overlay')?.textContent === 'Ny synlig text',
+    'Förhandsvisningen uppdaterades inte när texten ändrades.'
+  );
 }
 
 async function testProjectCancel() {
@@ -266,6 +285,7 @@ async function testMultiClipSplit() {
   ];
   window.__test.state.clips = clips;
   clips.forEach(window.__test.createClipElement);
+  window.__test.renderTimelineLinkConnectors();
   assert(window.document.querySelectorAll('.timeline-link-connector').length === 1, 'Länkade video- och ljudklipp fick ingen kedjeikon.');
   window.__test.selectClips(clips.map((clip) => clip.id), 'video');
   window.__test.setPlayhead(2, false);
@@ -292,6 +312,36 @@ async function testMultiClipSplit() {
   assert(window.document.querySelectorAll('.timeline-link-connector').length === 1, 'Kedjeikonen försvann inte när en länk separerades.');
   window.__test.undoEdit();
   assert(window.__test.state.clips.length === 4, 'Multidelningen gick inte att ångra i ett steg.');
+}
+
+async function testSingleSelectedLinkedClipSplit() {
+  const window = makeWindow();
+  const clips = [
+    {
+      id: 'linked-video', name: 'Video', kind: 'video', mediaId: 'video-media', mediaDuration: 8,
+      start: 0, trimStart: 0, trimEnd: 6, trackIndex: 0, linkGroupId: 'linked-pair'
+    },
+    {
+      id: 'linked-audio', name: 'Ljud', kind: 'audio', mediaId: 'audio-media', mediaDuration: 8,
+      start: 0, trimStart: 0, trimEnd: 6, trackIndex: 0, linkGroupId: 'linked-pair'
+    }
+  ];
+  window.__test.state.clips = clips;
+  clips.forEach(window.__test.createClipElement);
+  window.__test.selectClips(['linked-video'], 'linked-video');
+  window.__test.setPlayhead(3, false);
+  window.__test.splitSelectedClip();
+
+  const result = window.__test.state.clips;
+  assert(result.length === 4, 'Delning av ett länkat videoklipp delade inte dess ljudpartner.');
+  const left = result.filter((clip) => clip.start === 0);
+  const right = result.filter((clip) => clip.start === 3);
+  assert(left.length === 2 && left[0].linkGroupId === left[1].linkGroupId, 'Vänsterhalvorna behöll inte länken.');
+  assert(
+    right.length === 2 && right[0].linkGroupId === right[1].linkGroupId &&
+    right[0].linkGroupId !== left[0].linkGroupId,
+    'Högerhalvorna fick inte en egen gemensam länk.'
+  );
 }
 
 async function testSynchronizedMultiDrag() {
@@ -485,11 +535,13 @@ async function testToolbarLinkToggle() {
 (async () => {
   await testServerContracts();
   await testDeleteUndo();
+  await testTextCanBeEditedImmediately();
   await testProjectCancel();
   await testLegacyColorProject();
   await testDelayedAutoSplitPersistence();
   await testVideoContextMenuSeparatesAudio();
   await testMultiClipSplit();
+  await testSingleSelectedLinkedClipSplit();
   await testSynchronizedMultiDrag();
   await testVerticalStackDrag();
   await testDoubleClickMovesPlayhead();

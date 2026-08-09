@@ -39,6 +39,12 @@ const MAX_DURATION = 4 * 60 * 60;
 const MAX_AUDIO_ANALYSES = 200;
 const MAX_AUDIO_TASKS = 2;
 const AUDIO_TASK_TIMEOUT_MS = 30 * 60 * 1000;
+const EXPORT_SAFETY_BYTES = 512 * 1024 * 1024;
+const CUDA_VIDEO_DECODERS = Object.freeze({
+  av1: 'av1_cuvid', h264: 'h264_cuvid', hevc: 'hevc_cuvid', mjpeg: 'mjpeg_cuvid',
+  mpeg1video: 'mpeg1_cuvid', mpeg2video: 'mpeg2_cuvid', mpeg4: 'mpeg4_cuvid',
+  vc1: 'vc1_cuvid', vp8: 'vp8_cuvid', vp9: 'vp9_cuvid'
+});
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tif', '.tiff', '.svg']);
 const ALLOWED_EXTENSIONS = new Set([
   '.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v',
@@ -279,7 +285,7 @@ async function probeMedia(filePath, extension) {
   if (extension === '.svg') return probeSvg(filePath);
   const { stdout } = await runProcess('ffprobe', [
     '-v', 'error', '-show_entries',
-    'format=duration:stream=index,codec_type,codec_name,width,height,duration:' +
+    'format=duration:stream=index,codec_type,codec_name,width,height,duration,avg_frame_rate,r_frame_rate:' +
     'stream_tags=rotate:stream_side_data=rotation',
     '-of', 'json', filePath
   ]);
@@ -307,6 +313,7 @@ async function probeMedia(filePath, extension) {
     width: swapsDimensions ? encodedHeight : encodedWidth,
     height: swapsDimensions ? encodedWidth : encodedHeight,
     rotation,
+    frameRate: isImage ? null : (parseFrameRate(video?.avg_frame_rate) ?? parseFrameRate(video?.r_frame_rate)),
     videoCodec: video?.codec_name || null,
     audioCodec: audio?.codec_name || null
   };
@@ -315,7 +322,7 @@ async function probeMedia(filePath, extension) {
 async function refreshLegacyVideoMetadata() {
   let changed = false;
   for (const [id, item] of mediaLibrary) {
-    if (item.kind !== 'video' || Number.isFinite(item.rotation)) continue;
+    if (item.kind !== 'video' || (Number.isFinite(item.rotation) && Number.isFinite(item.frameRate))) continue;
     const filePath = path.join(UPLOAD_DIR, item.storedName);
     try {
       const metadata = await probeMedia(filePath, path.extname(item.storedName).toLowerCase());
@@ -335,6 +342,27 @@ async function hasWorkingNvenc(force = false) {
     'color=black:s=256x256:d=0.1', '-frames:v', '1', '-c:v', 'h264_nvenc', '-f', 'null', '-'
   ]).then(() => true).catch(() => false);
   return nvencCheck;
+}
+
+function cudaDecoderForMedia(media) {
+  return CUDA_VIDEO_DECODERS[String(media?.videoCodec || '').toLowerCase()] || null;
+}
+
+function appendMediaInputArgs(args, clip, inputPath, requireCuda = true, frameRate = 30) {
+  const length = Math.max(0.001, Number(clip.trimEnd) - Number(clip.trimStart));
+  if (clip.kind === 'image') args.push('-loop', '1', '-framerate', formatFrameRate(frameRate));
+  if (clip.kind === 'video' && requireCuda) {
+    const decoder = cudaDecoderForMedia(clip.media);
+    if (!decoder) {
+      throw new Error(`CUDA/NVDEC saknar stöd för videocodec "${clip.media?.videoCodec || 'okänd'}".`);
+    }
+    args.push('-c:v', decoder);
+  }
+  if (clip.kind === 'video' || clip.kind === 'audio') {
+    args.push('-ss', Number(clip.trimStart).toFixed(3), '-t', length.toFixed(3));
+  }
+  args.push('-i', inputPath);
+  return args;
 }
 
 const storage = multer.diskStorage({
@@ -455,6 +483,76 @@ app.get('/api/media/:id/waveform', async (request, response, next) => {
       duration,
       sampleRate
     });
+  } catch (error) {
+    if (!error.status) error.status = 400;
+    next(error);
+  }
+});
+
+const thumbnailCache = new Map();
+let activeThumbTasks = 0;
+const MAX_THUMB_TASKS = 4;
+
+async function withThumbTask(callback) {
+  if (activeThumbTasks >= MAX_THUMB_TASKS) {
+    const error = new Error('För många stillbildsjobb körs samtidigt. Försök igen om en stund.');
+    error.status = 429;
+    throw error;
+  }
+  activeThumbTasks += 1;
+  try {
+    return await callback();
+  } finally {
+    activeThumbTasks -= 1;
+  }
+}
+
+app.get('/api/media/:id/thumbs', async (request, response, next) => {
+  try {
+    const item = mediaLibrary.get(request.params.id);
+    if (!item) return response.status(404).json({ error: 'Mediefilen finns inte.' });
+    if (!item.hasVideo || item.kind === 'image') {
+      return response.status(400).json({ error: 'Filen har ingen video att hämta stillbilder från.' });
+    }
+    const frameWidth = Math.round(clamp(Number(request.query.width) || 160, 48, 640) / 32) * 32;
+    const count = Math.round(clamp(Number(request.query.count) || 4, 1, 16));
+    const duration = Number(item.duration) || 0;
+    if (duration <= 0) throw badRequest('Mediet saknar längd.');
+    const requestedStart = Number(request.query.start);
+    const requestedEnd = Number(request.query.end);
+    const start = Number.isFinite(requestedStart) ? clamp(requestedStart, 0, duration) : 0;
+    const end = Number.isFinite(requestedEnd) ? clamp(requestedEnd, start, duration) : duration;
+    if (end - start < 0.2) throw badRequest('Klippintervallet är för kort för stillbilder.');
+    const key = `${item.id}:${frameWidth}:${count}:${start.toFixed(3)}:${end.toFixed(3)}`;
+    const cached = thumbnailCache.get(key);
+    if (cached) {
+      console.log(`[THUMBS] cache-träff ${item.name} · ${count} rutor · ${frameWidth}px · ${start.toFixed(1)}–${end.toFixed(1)}s`);
+      response.setHeader('Cache-Control', 'private, max-age=86400');
+      response.type('image/jpeg').send(cached);
+      return;
+    }
+    const startedAt = Date.now();
+    const filePath = path.join(UPLOAD_DIR, item.storedName);
+    const interval = Math.max(0.1, (end - start) / count);
+    const positions = [];
+    for (let i = 0; i < count; i += 1) {
+      const t = start + (i + 0.5) * interval;
+      positions.push(Math.min(t, Math.max(0, end - 0.1)).toFixed(3));
+    }
+    const args = ['-hide_banner', '-loglevel', 'error', '-y'];
+    for (const t of positions) args.push('-ss', t, '-i', filePath);
+    const scaleChains = positions.map((_, i) =>
+      `[${i}:v]scale=${frameWidth}:-2:flags=lanczos[v${i}]`
+    );
+    const stack = `[v0]${positions.slice(1).map((_, i) => `[v${i + 1}]`).join('')}hstack=inputs=${positions.length}`;
+    args.push('-filter_complex', `${scaleChains.join(';')};${stack}`);
+    args.push('-frames:v', '1', '-q:v', '4', '-f', 'mjpeg', 'pipe:1');
+    const { buffer } = await withThumbTask(() => runProcessBuffer('ffmpeg', args, { timeout: 30_000, killSignal: 'SIGKILL' }));
+    if (!buffer.length) throw badRequest('Kunde inte generera stillbilder.');
+    thumbnailCache.set(key, buffer);
+    console.log(`[THUMBS] genererade ${item.name} · ${count} rutor · ${Date.now() - startedAt} ms`);
+    response.setHeader('Cache-Control', 'private, max-age=86400');
+    response.type('image/jpeg').send(buffer);
   } catch (error) {
     if (!error.status) error.status = 400;
     next(error);
@@ -908,16 +1006,27 @@ app.post('/api/audio/master', async (request, response, next) => {
   }
 });
 
-app.post('/api/export', (request, response, next) => {
+app.post('/api/export', async (request, response, next) => {
   try {
     const project = validateProject(request.body);
+    const availableBytes = await availableExportBytes();
+    const reservedBytes = [...jobs.values()]
+      .filter((candidate) => ['queued', 'rendering', 'upscaling'].includes(candidate.status))
+      .reduce((total, candidate) => total + (Number(candidate.reservedBytes) || 0), 0);
+    const requiredBytes = ensureExportStorage(project, availableBytes, reservedBytes);
     const id = crypto.randomUUID();
-    const job = { id, format: project.format, status: 'queued', progress: 0, createdAt: new Date().toISOString() };
+    const job = {
+      id, format: project.format, status: 'queued', progress: 0,
+      createdAt: new Date().toISOString(), reservedBytes: requiredBytes
+    };
     jobs.set(id, job);
     response.status(202).json(job);
     setImmediate(() => {
       renderProject(id, project).catch((error) => {
-        Object.assign(job, { status: 'failed', error: error.message || 'Exporten kunde inte startas.' });
+        Object.assign(job, {
+          status: 'failed', reservedBytes: 0,
+          error: error.message || 'Exporten kunde inte startas.'
+        });
       });
     });
   } catch (error) {
@@ -947,6 +1056,7 @@ app.post('/api/jobs/:id/cancel', (request, response) => {
     return response.json({ status: job.status });
   }
   Object.assign(job, { aborted: true, status: 'cancelled', progress: job.progress || 0, message: 'Avbruten av användaren.' });
+  job.reservedBytes = 0;
   const pid = job.encodePid;
   if (pid) {
     try { process.kill(pid, 'SIGKILL'); } catch (_error) { /* redan död */ }
@@ -988,6 +1098,39 @@ function finiteNumber(value, name, minimum = 0, maximum = MAX_DURATION) {
 
 function clamp(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, Number(value) || 0));
+}
+
+function parseFrameRate(value) {
+  if (value == null || value === '') return null;
+  const parts = String(value).split('/');
+  const numerator = Number(parts[0]);
+  const denominator = parts.length > 1 ? Number(parts[1]) : 1;
+  const frameRate = numerator / denominator;
+  return Number.isFinite(frameRate) && frameRate >= 1 && frameRate <= 120 ? frameRate : null;
+}
+
+function formatFrameRate(value) {
+  const frameRate = parseFrameRate(value) ?? 30;
+  return frameRate.toFixed(6).replace(/\.?0+$/, '');
+}
+
+function chooseProjectFrameRate(clips) {
+  const durationsByRate = new Map();
+  for (const clip of clips || []) {
+    if (clip.kind !== 'video') continue;
+    const frameRate = parseFrameRate(clip.media?.frameRate);
+    if (!frameRate) continue;
+    const duration = Math.max(0, Number(clip.trimEnd) - Number(clip.trimStart));
+    const key = frameRate.toFixed(3);
+    const current = durationsByRate.get(key) || { frameRate, duration: 0 };
+    current.duration += duration;
+    durationsByRate.set(key, current);
+  }
+  let selected = null;
+  for (const candidate of durationsByRate.values()) {
+    if (!selected || candidate.duration > selected.duration) selected = candidate;
+  }
+  return selected?.frameRate ?? 30;
 }
 
 function parseNoiseFloor(stderr) {
@@ -1079,6 +1222,59 @@ function validateProject(body) {
   const firstVisual = visibleClips.find((clip) => clip.kind === 'video' || clip.kind === 'image');
   const canvas = validateCanvas(body.canvas, firstVisual?.media.width, firstVisual?.media.height);
   return { clips: visibleClips, hiddenLayers, subtitles, currentDuration: duration, duration: Math.max(visibleDuration, 0.1), format, hardware, upscale, canvas, quality };
+}
+
+function estimateExportStorageBytes(project) {
+  const duration = Math.max(0.1, Number(project?.duration) || 0.1);
+  if (project?.format === 'wav') {
+    return Math.ceil(duration * 48000 * 2 * 2 * 1.05 + 128 * 1024 * 1024);
+  }
+  if (project?.format === 'mp3') {
+    return Math.ceil(duration * 192000 / 8 * 1.08 + 128 * 1024 * 1024);
+  }
+
+  const width = Math.max(64, Number(project?.canvas?.width) || 1920);
+  const height = Math.max(64, Number(project?.canvas?.height) || 1080);
+  const quality = Math.round(clamp(Number(project?.quality) || 5, 1, 5));
+  const bitrateAt1080p = [0, 2, 5, 10, 25, 60][quality] * 1_000_000;
+  const resolutionScale = Math.max(0.2, (width * height) / (1920 * 1080));
+  const videoBytes = duration * bitrateAt1080p * resolutionScale / 8;
+  const audioBytes = duration * 192000 / 8;
+  const encodedBytes = (videoBytes + audioBytes) * 1.12;
+  const workingCopies = project?.upscale ? 3 : 1;
+  return Math.ceil(encodedBytes * workingCopies + EXPORT_SAFETY_BYTES);
+}
+
+function formatStorage(bytes) {
+  const gibibytes = Math.max(0, Number(bytes) || 0) / (1024 ** 3);
+  return `${gibibytes.toFixed(gibibytes < 10 ? 1 : 0)} GB`;
+}
+
+function ensureExportStorage(project, availableBytes, reservedBytes = 0) {
+  const requiredBytes = estimateExportStorageBytes(project);
+  const usableBytes = Math.max(0, Number(availableBytes) - Math.max(0, Number(reservedBytes) || 0));
+  if (!Number.isFinite(usableBytes) || usableBytes < requiredBytes) {
+    const error = new Error(
+      `För lite ledigt diskutrymme: exporten behöver cirka ${formatStorage(requiredBytes)}, ` +
+      `men ${formatStorage(usableBytes)} är ledigt. Frigör utrymme eller välj lägre kvalitet.`
+    );
+    error.status = 507;
+    throw error;
+  }
+  return requiredBytes;
+}
+
+async function availableExportBytes() {
+  const stats = await fsp.statfs(EXPORT_DIR);
+  return Number(stats.bavail) * Number(stats.bsize);
+}
+
+function ffmpegFailureMessage(code, stderr) {
+  const details = String(stderr || '');
+  if (/no space left on device|\bENOSPC\b/i.test(details)) {
+    return 'Exporten avbröts eftersom disken blev full. Delfilen har tagits bort; frigör utrymme eller välj lägre kvalitet.';
+  }
+  return `FFmpeg misslyckades (kod ${code}). ${details.slice(-1200)}`;
 }
 
 function validateBlur(rawBlur) {
@@ -1473,6 +1669,7 @@ function runUpscale(job, inputPath, outputPath) {
   const pythonCandidates = [
     process.env.REALESRGAN_PYTHON,
     path.join(ROOT, '.venv', 'bin', 'python'),
+    path.join(ROOT, '..', 'pytorch-cuda', 'venv', 'bin', 'python'),
     path.join(ROOT, '..', 'venv', 'bin', 'python')
   ].filter(Boolean);
   const python = pythonCandidates.find((candidate) => fs.existsSync(candidate));
@@ -1532,7 +1729,7 @@ function buildCircleMaskFilter(size) {
     `a='if(lte(${distance},${radius}),alpha(X,Y),0)',`;
 }
 
-function buildCircleMaskGraph(clip, width, height, length) {
+function buildCircleMaskGraph(clip, width, height, length, frameRate = 30) {
   const size = clamp(Number(clip.circular.size) || 0.5, 0.1, 0.5);
   const radius = `${size.toFixed(4)}*min(W,H)`;
   const distance = `sqrt((X-W/2)*(X-W/2)+(Y-H/2)*(Y-H/2))`;
@@ -1541,12 +1738,14 @@ function buildCircleMaskGraph(clip, width, height, length) {
   const crop = clip.crop || { left: 0, right: 0, top: 0, bottom: 0 };
   const cw = Math.max(2, Math.round(sW * (1 - crop.left - crop.right)));
   const ch = Math.max(2, Math.round(sH * (1 - crop.top - crop.bottom)));
-  const frames = Math.ceil(Math.max(0, length) * 30) + 60;
+  const fps = parseFrameRate(frameRate) ?? 30;
+  const fpsText = formatFrameRate(fps);
+  const frames = Math.ceil(Math.max(0, length) * fps) + Math.ceil(fps * 2);
   return {
     graph: `color=c=white:s=${cw}x${ch}:r=1:d=1,` +
       buildVisualContentFilter(clip, width, height) +
       `format=gray,geq=lum='if(lte(${distance},${radius}),255,0)',` +
-      `loop=loop=${frames}:size=1:start=0,fps=30[mask${clip._renderIndex}];`,
+      `loop=loop=${frames}:size=1:start=0,fps=${fpsText}[mask${clip._renderIndex}];`,
     label: `[vcirc${clip._renderIndex}][mask${clip._renderIndex}]alphamerge,`
   };
 }
@@ -1583,7 +1782,10 @@ function buildVisualSizeFilter(clip, width, height) {
   return buildVisualContentFilter(clip, width, height) + buildVisualFrameFilter(clip, width, height);
 }
 
-const WHISPER_VENV = path.join(ROOT, '..', 'whisper', '.venv');
+const WHISPER_VENV_CANDIDATES = [
+  path.join(ROOT, 'whisper-venv'),
+  path.join(ROOT, '..', 'whisper', '.venv')
+];
 const TRANSCRIBE_SCRIPT = path.join(ROOT, 'transcribe.py');
 const ALLOWED_WHISPER_MODELS = new Set(['tiny', 'base', 'small', 'medium', 'large-v2', 'large-v3']);
 const ALLOWED_WHISPER_LANGUAGES = new Set([
@@ -1591,12 +1793,19 @@ const ALLOWED_WHISPER_LANGUAGES = new Set([
 ]);
 
 function whisperPython() {
-  const candidate = path.join(WHISPER_VENV, 'bin', 'python');
-  return fs.existsSync(candidate) ? candidate : 'python3';
+  const venv = WHISPER_VENV_CANDIDATES.find((candidate) =>
+    fs.existsSync(path.join(candidate, 'bin', 'python'))
+  );
+  return venv ? path.join(venv, 'bin', 'python') : 'python3';
 }
 
 function whisperEnv() {
-  const cublasDir = path.join(WHISPER_VENV, 'lib', 'python3.11', 'site-packages', 'nvidia', 'cublas', 'lib');
+  const venv = WHISPER_VENV_CANDIDATES.find((candidate) =>
+    fs.existsSync(path.join(candidate, 'bin', 'python'))
+  );
+  const cublasDir = venv
+    ? path.join(venv, 'lib', 'python3.11', 'site-packages', 'nvidia', 'cublas', 'lib')
+    : '';
   const extra = fs.existsSync(cublasDir) ? cublasDir : '';
   const current = process.env.LD_LIBRARY_PATH || '';
   return { ...process.env, LD_LIBRARY_PATH: extra ? `${extra}:${current}` : current };
@@ -1683,16 +1892,18 @@ function trackFfmpegProgress(child, job, duration, outputPath) {
   child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString()).slice(-8000); });
   child.on('error', (error) => {
     spawnError = error;
-    Object.assign(job, { status: 'failed', error: error.message });
+    Object.assign(job, { status: 'failed', reservedBytes: 0, error: error.message });
+    fsp.unlink(outputPath).catch(() => {});
   });
   return new Promise((resolve) => {
     child.on('close', (code) => {
       if (job.aborted || spawnError) return resolve(false);
       if (code !== 0) {
-        Object.assign(job, { status: 'failed', error: `FFmpeg misslyckades (kod ${code}). ${stderr.slice(-1200)}` });
+        Object.assign(job, { status: 'failed', reservedBytes: 0, error: ffmpegFailureMessage(code, stderr) });
+        fsp.unlink(outputPath).catch(() => {});
         return resolve(false);
       }
-      Object.assign(job, { status: 'completed', progress: 100, outputPath });
+      Object.assign(job, { status: 'completed', progress: 100, outputPath, reservedBytes: 0 });
       resolve(true);
     });
   });
@@ -1845,10 +2056,21 @@ async function renderProject(jobId, project) {
     return;
   }
   const job = jobs.get(jobId);
-  job.status = 'rendering';
-  const useNvenc = project.hardware === 'cpu' ? false : await hasWorkingNvenc();
-  if (project.hardware === 'nvidia' && !useNvenc) {
+  Object.assign(job, {
+    status: 'rendering', phase: 'prepare', phaseStartedAt: new Date().toISOString(),
+    decoder: 'NVIDIA CUDA/NVDEC'
+  });
+  const useNvenc = await hasWorkingNvenc();
+  if (!useNvenc) {
     Object.assign(job, { status: 'failed', error: 'NVENC är inte tillgängligt. Kontrollera NVIDIA-drivrutin och FFmpeg.' });
+    return;
+  }
+  const unsupportedVideo = project.clips.find((clip) => clip.kind === 'video' && !cudaDecoderForMedia(clip.media));
+  if (unsupportedVideo) {
+    Object.assign(job, {
+      status: 'failed',
+      error: `CUDA/NVDEC saknar stöd för videocodec "${unsupportedVideo.media?.videoCodec || 'okänd'}".`
+    });
     return;
   }
 
@@ -1864,6 +2086,9 @@ async function renderProject(jobId, project) {
     tempPngs.push(pngPath);
   }));
   const { width, height } = project.canvas;
+  const frameRate = chooseProjectFrameRate(project.clips);
+  const fps = formatFrameRate(frameRate);
+  job.frameRate = frameRate;
   const htmlClips = project.clips.filter((clip) => clip.kind === 'html');
   let htmlIndex = 0;
   for (const clip of htmlClips) {
@@ -1875,7 +2100,7 @@ async function renderProject(jobId, project) {
     tempPngs.push(framesDir);
     job.phase = 'html-render';
     job.phaseStartedAt = new Date().toISOString();
-    await renderHtmlBlockFrames(html, blockWidth, blockHeight, length, 30, framesDir);
+    await renderHtmlBlockFrames(html, blockWidth, blockHeight, length, frameRate, framesDir);
     clip._htmlFramesDir = framesDir;
     clip._htmlBlockWidth = blockWidth;
     clip._htmlBlockHeight = blockHeight;
@@ -1889,26 +2114,23 @@ async function renderProject(jobId, project) {
     if (clip.kind === 'blur' || clip.kind === 'text' || clip.kind === 'color' || clip.kind === 'html') return;
     clip.inputIndex = inputIndex;
     inputIndex += 1;
-    if (clip.kind === 'image') args.push('-loop', '1', '-framerate', '30');
     const inputPath = clip._svgPngPath || path.join(UPLOAD_DIR, clip.media.storedName);
-    args.push('-i', inputPath);
+    appendMediaInputArgs(args, clip, inputPath, true, frameRate);
   });
   for (const clip of project.clips) {
     if (clip.kind !== 'html') continue;
     clip.inputIndex = inputIndex;
     inputIndex += 1;
-    args.push('-framerate', '30', '-start_number', '1', '-i', path.join(clip._htmlFramesDir, 'frame-%04d.png'));
+    args.push('-framerate', fps, '-start_number', '1', '-i', path.join(clip._htmlFramesDir, 'frame-%04d.png'));
   }
-  const filters = [`color=c=black:s=${width}x${height}:r=30:d=${project.duration.toFixed(3)}[base]`];
+  const filters = [`color=c=black:s=${width}x${height}:r=${fps}:d=${project.duration.toFixed(3)}[base]`];
   const videos = [];
   const audios = [];
 
   project.clips.forEach((clip, index) => {
     const length = clip.trimEnd - clip.trimStart;
     if (clip.kind === 'video' || clip.kind === 'image') {
-      const trim = clip.kind === 'image'
-        ? `trim=duration=${length.toFixed(3)}`
-        : `trim=start=${clip.trimStart.toFixed(3)}:end=${clip.trimEnd.toFixed(3)}`;
+      const trim = `trim=duration=${length.toFixed(3)}`;
       const cropWidth = 1 - clip.crop.left - clip.crop.right;
       const cropHeight = 1 - clip.crop.top - clip.crop.bottom;
       const cropFilter = cropWidth < 1 || cropHeight < 1
@@ -1918,7 +2140,7 @@ async function renderProject(jobId, project) {
       const circleFilter = clip.circular
         ? (() => {
             clip._renderIndex = index;
-            const mask = buildCircleMaskGraph(clip, width, height, length);
+            const mask = buildCircleMaskGraph(clip, width, height, length, frameRate);
             return `format=rgba[vcirc${index}];${mask.graph}${mask.label}`;
           })()
         : '';
@@ -1929,10 +2151,10 @@ async function renderProject(jobId, project) {
         animPost = `format=rgba,fade=t=in:st=${clip.start.toFixed(3)}:` +
           `d=${clip.animIn.duration.toFixed(3)}:alpha=1,`;
       } else if (clip.animIn?.type === 'scale') {
-        const totalFrames = Math.ceil(length * 30);
-        const animFrames = Math.ceil(clip.animIn.duration * 30);
+        const totalFrames = Math.ceil(length * frameRate);
+        const animFrames = Math.ceil(clip.animIn.duration * frameRate);
         animPost = `zoompan=z='min(1,0.01+0.99*on/${animFrames})':` +
-          `d=${totalFrames}:s=${width}x${height}:fps=30,format=rgba,` +
+          `d=${totalFrames}:s=${width}x${height}:fps=${fps},format=rgba,` +
           `setpts=PTS-STARTPTS+${clip.start.toFixed(3)}/TB,`;
       }
       const baseLabel = clip.transitionIn?.type === 'dissolve' ? `vbase${index}` : `v${index}`;
@@ -1971,7 +2193,7 @@ async function renderProject(jobId, project) {
       const px = Math.max(0, Math.round(c.x * width - pw / 2));
       const py = Math.max(0, Math.round(c.y * height - ph / 2));
       filters.push(
-        `color=c=${c.color.replace('#', '0x')}:s=${width}x${height}:r=30:d=${project.duration.toFixed(3)}` +
+        `color=c=${c.color.replace('#', '0x')}:s=${width}x${height}:r=${fps}:d=${project.duration.toFixed(3)}` +
         `[colorfull${index}];` +
         `[colorfull${index}]crop=w=${pw}:h=${ph}:x=${px}:y=${py}` +
         `[${blockLabel}]`
@@ -2010,7 +2232,7 @@ async function renderProject(jobId, project) {
     if (clip.media?.hasAudio && !clip.muted) {
       const delay = Math.round(clip.start * 1000);
       filters.push(
-        `[${clip.inputIndex}:a]atrim=start=${clip.trimStart.toFixed(3)}:end=${clip.trimEnd.toFixed(3)},` +
+        `[${clip.inputIndex}:a]atrim=duration=${length.toFixed(3)},` +
         `asetpts=PTS-STARTPTS,adelay=${delay}:all=1[a${index}]`
       );
       audios.push(`a${index}`);
@@ -2052,7 +2274,7 @@ async function renderProject(jobId, project) {
         `[blursource${index}]gblur=sigma=${blur.strength.toFixed(2)}:steps=2[blurred${index}]`
       );
       filters.push(
-        `color=c=black:s=${width}x${height}:r=30:d=${project.duration.toFixed(3)},format=gray,` +
+        `color=c=black:s=${width}x${height}:r=${fps}:d=${project.duration.toFixed(3)},format=gray,` +
         `geq=lum='${polygonMaskExpression(blur.points)}'[blurmask${index}]`
       );
       filters.push(
@@ -2126,11 +2348,15 @@ async function renderProject(jobId, project) {
   if (audios.length === 0) {
     filters.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${project.duration.toFixed(3)}[aout]`);
   } else if (audios.length === 1) {
-    filters.push(`[${audios[0]}]apad,atrim=duration=${project.duration.toFixed(3)}[aout]`);
+    filters.push(
+      `[${audios[0]}]aresample=async=1:first_pts=0,asetpts=N/SR/TB,` +
+      `apad,atrim=duration=${project.duration.toFixed(3)}[aout]`
+    );
   } else {
     filters.push(
       `${audios.map((label) => `[${label}]`).join('')}amix=inputs=${audios.length}:duration=longest:` +
-      `normalize=0,apad,atrim=duration=${project.duration.toFixed(3)}[aout]`
+      `normalize=0,aresample=async=1:first_pts=0,asetpts=N/SR/TB,` +
+      `apad,atrim=duration=${project.duration.toFixed(3)}[aout]`
     );
   }
 
@@ -2143,25 +2369,16 @@ async function renderProject(jobId, project) {
   const qualityLabel = lossless ? 'lossless' : (['', 'låg', '', 'standard', '', ''][q] || `nivå ${q}`);
 
   args.push('-filter_complex', filters.join(';'), '-map', '[vout]', '-map', '[aout]');
-  if (useNvenc) {
-    args.push('-c:v', 'h264_nvenc', '-preset', 'p5', '-cq', String(cq), '-profile:v', 'high');
-  } else {
-    args.push('-c:v', 'libx264', '-preset', 'medium');
-    if (lossless) {
-      args.push('-x264-params', 'lossless=1');
-    } else {
-      args.push('-crf', String(crf));
-    }
-    args.push('-profile:v', 'high', '-level', '41');
-  }
+  args.push('-c:v', 'h264_nvenc', '-preset', 'p5', '-cq', String(cq), '-profile:v', 'high');
   args.push(
+    '-r', fps, '-fps_mode', 'cfr',
     '-c:a', 'aac', '-b:a', '192k', '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
     '-t', project.duration.toFixed(3), '-progress', 'pipe:1', '-nostats', outputPath
   );
-  const hwLabel = useNvenc ? 'NVIDIA NVENC' : 'CPU (libx264)';
+  const hwLabel = 'NVIDIA CUDA/NVDEC → NVENC';
   const encoderLabel = lossless ? `${hwLabel} · lossless` : `${hwLabel} · ${qualityLabel} (CRF ${crf})`;
   job.encoder = encoderLabel;
-  job.phase = 'encode';
+  job.phase = 'seek-decode';
   job.phaseStartedAt = new Date().toISOString();
   const child = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
   job.encodePid = child.pid;
@@ -2174,23 +2391,31 @@ async function renderProject(jobId, project) {
     for (const line of lines) {
       const match = line.match(/^out_time_ms=(\d+)$/);
       if (match) {
+        if (job.phase === 'seek-decode') {
+          job.phase = 'encode';
+          job.phaseStartedAt = new Date().toISOString();
+        }
         job.progress = Math.min(99, Math.round((Number(match[1]) / 1_000_000 / project.duration) * 100));
         updateEta(job);
       }
     }
   });
   child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString()).slice(-8000); });
-  child.on('error', (error) => Object.assign(job, { status: 'failed', error: error.message }));
+  child.on('error', (error) => {
+    Object.assign(job, { status: 'failed', reservedBytes: 0, error: error.message });
+    fsp.unlink(outputPath).catch(() => {});
+  });
   child.on('close', (code) => {
     if (job.aborted) return;
     if (code !== 0) {
-      Object.assign(job, { status: 'failed', error: `FFmpeg misslyckades (kod ${code}). ${stderr.slice(-1200)}` });
+      Object.assign(job, { status: 'failed', reservedBytes: 0, error: ffmpegFailureMessage(code, stderr) });
+      fsp.unlink(outputPath).catch(() => {});
       cleanupTextFiles();
       return;
     }
     cleanupTextFiles();
     if (!project.upscale) {
-      Object.assign(job, { status: 'completed', progress: 100, outputPath });
+      Object.assign(job, { status: 'completed', progress: 100, outputPath, reservedBytes: 0 });
       return;
     }
     runUpscaleStep(jobId, project, outputPath);
@@ -2210,10 +2435,10 @@ async function renderProject(jobId, project) {
       await runUpscale(job, renderedPath, upscaledPath);
       if (job.aborted) return;
       await fsp.unlink(renderedPath).catch(() => {});
-      Object.assign(job, { status: 'completed', progress: 100, outputPath: upscaledPath });
+      Object.assign(job, { status: 'completed', progress: 100, outputPath: upscaledPath, reservedBytes: 0 });
     } catch (error) {
       if (job.aborted) return;
-      Object.assign(job, { status: 'failed', error: error.message });
+      Object.assign(job, { status: 'failed', error: error.message, reservedBytes: 0 });
     }
   }
 
@@ -2232,10 +2457,10 @@ app.get('/chain.svg', (_request, response) => response.type('image/svg+xml').sen
 app.get('/favicon.ico', (_request, response) => response.status(204).end());
 
 app.use((error, _request, response, _next) => {
-  const status = Number.isInteger(error.status) && error.status >= 400 && error.status < 500
+  const status = Number.isInteger(error.status) && error.status >= 400 && error.status < 600
     ? error.status
     : (error instanceof multer.MulterError ? 400 : 500);
-  if (status >= 500) console.error(error);
+  if (status >= 500 && status !== 507) console.error(error);
   response.status(status).json({ error: error.message || 'Ett oväntat serverfel uppstod.' });
 });
 
@@ -2274,6 +2499,8 @@ module.exports = {
   validateTransitionIn,
   validateBlur,
   validateText,
+  parseFrameRate,
+  chooseProjectFrameRate,
   parseNoiseFloor,
   textAnimationExpressions,
   buildAssSubtitle,
@@ -2287,5 +2514,11 @@ module.exports = {
   buildCircleMaskFilter,
   buildCircleMaskGraph,
   buildSubtitleAss,
+  cudaDecoderForMedia,
+  appendMediaInputArgs,
+  estimateExportStorageBytes,
+  ensureExportStorage,
+  ffmpegFailureMessage,
+  whisperPython,
   jobs
 };

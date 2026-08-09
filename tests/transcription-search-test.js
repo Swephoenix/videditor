@@ -91,10 +91,18 @@ const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mill
   }
   document.querySelector('#transcribe').click();
   await wait(100);
+  document.querySelector('#start-transcribe').click();
+  await wait(100);
 
   const search = document.querySelector('#transcript-search-input');
+  const resultsPanel = document.querySelector('#transcript-search-results');
   search.value = 'VÄRLDEN igen';
   search.dispatchEvent(new window.Event('input', { bubbles: true }));
+  console.log('Panel utan fokus dold:', resultsPanel.hidden, '(expect true)');
+  if (!resultsPanel.hidden) throw new Error('Sökträffspanelen ska vara dold utan fokus i sökfältet.');
+  search.dispatchEvent(new window.Event('focus', { bubbles: true }));
+  console.log('Panel med fokus synlig:', !resultsPanel.hidden, '(expect true)');
+  if (resultsPanel.hidden) throw new Error('Sökträffspanelen ska visas när sökfältet har fokus.');
   const results = [...document.querySelectorAll('.transcript-search-result')];
   if (results.length !== 1) throw new Error(`Förväntade en flerordsträff, fick ${results.length}.`);
   results[0].click();
@@ -102,6 +110,9 @@ const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mill
     throw new Error(`Spelhuvudet hoppade inte till ordtiden: ${document.querySelector('#timecode').textContent}`);
   }
   if (!results[0].textContent.includes('Hej världen igen')) throw new Error('Träffen saknar textutdrag.');
+  search.dispatchEvent(new window.Event('blur', { bubbles: true }));
+  console.log('Panel dold efter blur:', resultsPanel.hidden, '(expect true)');
+  if (!resultsPanel.hidden) throw new Error('Sökträffspanelen ska döljas när sökfältet tappar fokus.');
 
   const timelineScroll = document.querySelector('#timeline-scroll');
   timelineScroll.getBoundingClientRect = () => ({ left: 130, width: 900, right: 1030, top: 0, bottom: 260, height: 260 });

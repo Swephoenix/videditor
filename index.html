@@ -74,7 +74,7 @@
           <input id="export-quality" type="range" min="1" max="5" step="1" value="5">
           <span class="quality-range-label">1 (låg) – 5 (lossless)</span>
         </label>
-        <label class="hardware menu-item"><input id="use-nvidia" type="checkbox" checked> NVIDIA NVENC</label>
+        <label class="hardware menu-item" title="MP4-export kräver NVIDIA GPU"><input id="use-nvidia" type="checkbox" checked disabled> NVIDIA CUDA/NVDEC + NVENC (obligatorisk)</label>
         <label class="hardware menu-item"><input id="use-upscale" type="checkbox"> Snabb AI super-resolution 2×</label>
         <label class="hardware menu-item" title="Beskär exportytan till den minsta yta som faktiskt används av klippen och bilderna">
           <input id="auto-fit-canvas" type="checkbox"> Anpassa format till innehåll
@@ -95,6 +95,17 @@
       <div id="history-panel" class="history-panel" hidden>
         <div class="history-header">Historik</div>
         <div id="history-list" class="history-list"></div>
+      </div>
+    </div>
+
+    <div class="log-wrap">
+      <button id="log-toggle" class="history-btn" title="Processlogg">📋</button>
+      <div id="log-panel" class="log-panel" hidden>
+        <div class="history-header">
+          Processlogg
+          <button id="log-clear" type="button" class="log-clear" title="Rensa loggen">Rensa</button>
+        </div>
+        <div id="log-list" class="log-list" role="log" aria-live="polite"></div>
       </div>
     </div>
   </header>
@@ -332,6 +343,16 @@
       <svg width="20" height="20" aria-hidden="true"><use href="#icon-split-playhead"></use></svg>
       <span>Dela</span>
     </button>
+    <button class="quick-tool" id="qt-flag" title="Visa och sök bland flaggor" aria-haspopup="true" aria-expanded="false">
+      <svg width="20" height="20" aria-hidden="true"><use href="#icon-flag"></use></svg>
+      <span>Flaggor</span>
+    </button>
+    <button class="quick-tool flag-nav" id="qt-flag-prev" title="Hoppa till föregående flagga">
+      <span aria-hidden="true">◀</span>
+    </button>
+    <button class="quick-tool flag-nav" id="qt-flag-next" title="Hoppa till nästa flagga">
+      <span aria-hidden="true">▶</span>
+    </button>
     <button class="quick-tool" id="qt-remove" title="Ta bort markerat klipp (Delete)" disabled>
       <svg width="20" height="20" aria-hidden="true"><use href="#icon-delete"></use></svg>
       <span>Ta bort</span>
@@ -366,6 +387,23 @@
     </label>
     <p class="canvas-size-hint">Format: <span id="canvas-size-summary">16:9 · 1920×1080</span></p>
   </div>
+  <div id="flag-popover" class="flag-popover" hidden>
+    <div class="flag-popover-header">
+      <strong>Flaggor</strong>
+      <button id="flag-popover-add" type="button" class="flag-popover-add" title="Lägg till flagga vid spelhuvud (F)">
+        <svg width="16" height="16" aria-hidden="true"><use href="#icon-flag"></use></svg>
+        Ny
+      </button>
+    </div>
+    <label class="flag-popover-search-label" for="flag-search-input">Sök i flaggor</label>
+    <input id="flag-search-input" type="search" autocomplete="off" placeholder="Anteckning eller tid">
+    <div id="flag-popover-list" class="flag-popover-list" role="listbox" aria-label="Flagglista"></div>
+    <div class="flag-popover-footer">
+      <button id="flag-popover-prev" type="button" aria-label="Föregående flagga" disabled>‹ Föregående</button>
+      <button id="flag-popover-next" type="button" aria-label="Nästa flagga" disabled>Nästa ›</button>
+      <output id="flag-popover-status" aria-live="polite"></output>
+    </div>
+  </div>
 </div>
 </div>
 
@@ -396,6 +434,12 @@
       <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
         <path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="m6.5 7 1 13h9l1-13"/>
         <path d="M10 11v5"/><path d="M14 11v5"/>
+      </g>
+    </symbol>
+    <symbol id="icon-flag" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5 21V4"/>
+        <path d="M5 4.5h13l-3 3.75 3 3.75H5"/>
       </g>
     </symbol>
     <symbol id="icon-crop" viewBox="0 0 24 24">
@@ -436,21 +480,29 @@
   </section>
 
   <section class="timeline-container">
-    <div class="track-labels">
-      <div class="ruler-label"><span id="timecode">00:00.000</span></div>
-      <div class="track-label" id="visual-label">V1</div>
-      <div class="track-label" id="transcription-label"><button id="toggle-transcription" class="transcription-eye" title="Visa/dölj transkription i video" aria-label="Visa/dölj transkription i video"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button> TRANSKRIB.<input id="burn-transcription" type="checkbox" hidden></div>
-      <div class="track-label" id="audio-label">LJUD 1</div>
-    </div>
-    <div class="timeline-scroll" id="timeline-scroll">
-      <div class="timeline-tracks" id="timeline-tracks">
-        <div class="ruler" id="ruler"></div>
-        <div class="playhead" id="playhead"></div>
-        <div class="track visual-track" id="visual-track"></div>
-        <div class="track" id="transcription-track"></div>
-        <div class="track audio-track" id="audio-track"></div>
-        <div id="timeline-link-connectors" class="timeline-link-connectors" aria-hidden="true"></div>
+    <div class="timeline-body">
+      <div class="track-labels">
+        <div class="ruler-label"><span id="timecode">00:00.000</span></div>
+        <div class="flag-label" aria-hidden="true"></div>
+        <div class="track-label" id="visual-label">V1</div>
+        <div class="track-label" id="transcription-label"><button id="toggle-transcription" class="transcription-eye" title="Visa/dölj transkription i video" aria-label="Visa/dölj transkription i video"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button> TRANSKRIB.<input id="burn-transcription" type="checkbox" hidden></div>
+        <div class="track-label" id="audio-label">LJUD 1</div>
       </div>
+      <div class="timeline-scroll" id="timeline-scroll">
+        <div class="timeline-tracks" id="timeline-tracks">
+          <div class="ruler" id="ruler"></div>
+          <div class="flag-lane" id="flag-lane" aria-label="Flaggmarkeringar"></div>
+          <div class="playhead" id="playhead"></div>
+          <div id="snap-guide" class="snap-guide" aria-hidden="true" hidden></div>
+          <div class="track visual-track" id="visual-track"></div>
+          <div class="track" id="transcription-track"></div>
+          <div class="track audio-track" id="audio-track"></div>
+          <div id="timeline-link-connectors" class="timeline-link-connectors" aria-hidden="true"></div>
+        </div>
+      </div>
+    </div>
+    <div class="timeline-dragbar" id="timeline-dragbar" role="scrollbar" aria-controls="timeline-scroll" aria-label="Förflytta i tidslinjen">
+      <div class="timeline-dragbar-thumb" id="timeline-dragbar-thumb"></div>
     </div>
     <button id="playhead-follow" class="playhead-follow" type="button" hidden aria-label="Visa playheaden" title="Visa playheaden">➜</button>
   </section>
@@ -458,6 +510,38 @@
   <div id="clip-context-menu" class="context-menu" role="menu" hidden>
     <button id="transcribe" type="button" role="menuitem">Transkribera</button>
     <button id="separate-from-audio" type="button" role="menuitem" hidden>Separera från ljud</button>
+    <button id="edit-transcription" type="button" role="menuitem" hidden>Redigera</button>
+  </div>
+
+  <div id="layer-context-menu" class="context-menu" role="menu" hidden>
+    <span class="context-menu-title" id="layer-context-title"></span>
+    <button id="layer-forward" type="button" role="menuitem" title="Flytta klippet ett steg framåt i lagret (högre lager)">Framåt i lager</button>
+    <button id="layer-backward" type="button" role="menuitem" title="Flytta klippet ett steg bakåt i lagret (lägre lager)">Bakåt i lager</button>
+  </div>
+
+  <div id="transcription-edit-modal" class="modal" hidden>
+    <div class="modal-card">
+      <h2>Redigera transkription</h2>
+      <p id="transcription-edit-time" class="transcription-edit-time"></p>
+      <textarea id="transcription-edit-text" rows="6" class="transcription-edit-textarea" aria-label="Transkriptionstext"></textarea>
+      <div class="modal-actions">
+        <button id="save-transcription-edit" type="button">Spara</button>
+        <button id="close-transcription-edit" type="button">Avbryt</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="flag-edit-modal" class="modal" hidden>
+    <div class="modal-card">
+      <h2>Flagga vid <span id="flag-edit-time"></span></h2>
+      <label class="transcribe-language-label" for="flag-edit-note">Anteckning</label>
+      <textarea id="flag-edit-note" rows="3" class="transcription-edit-textarea" placeholder="Valfri anteckning…"></textarea>
+      <div class="modal-actions">
+        <button id="save-flag" type="button">Spara</button>
+        <button id="delete-flag" type="button" class="danger-button">Ta bort</button>
+        <button id="close-flag-edit" type="button">Avbryt</button>
+      </div>
+    </div>
   </div>
 
   <div id="export-modal" class="modal" hidden>
@@ -496,10 +580,17 @@
 
   <div id="transcribe-modal" class="modal" hidden>
     <div class="modal-card">
-      <h2>Transkriberar ljud</h2>
-      <progress id="transcribe-progress" max="100" value="0"></progress>
-      <p id="transcribe-message">Förbereder transkriberingen…</p>
+      <h2>Transkribera ljud</h2>
+      <label class="transcribe-language-label" for="transcribe-language">Språk</label>
+      <select id="transcribe-language" class="transcribe-language-select">
+        <option value="auto" selected>Auto (Whisper gissar)</option>
+        <option value="sv">Svenska</option>
+        <option value="en">Engelska</option>
+      </select>
+      <progress id="transcribe-progress" max="100" value="0" hidden></progress>
+      <p id="transcribe-message"></p>
       <div class="modal-actions">
+        <button id="start-transcribe" type="button">Transkribera</button>
         <button id="cancel-transcribe" type="button" hidden>Avbryt</button>
         <button id="close-transcribe-modal" type="button">Stäng</button>
       </div>

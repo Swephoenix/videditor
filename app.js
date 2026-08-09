@@ -4,7 +4,6 @@ const timelineModel = window.TimelineModel;
 if (!timelineModel) throw new Error('timeline-model.js måste laddas före app.js');
 
 const DEFAULT_PX_PER_SECOND = 40;
-const MIN_PX_PER_SECOND = 8;
 const MAX_PX_PER_SECOND = 320;
 let timelinePixelsPerSecond = DEFAULT_PX_PER_SECOND;
 const waveformCache = new Map();
@@ -20,6 +19,7 @@ const state = {
   currentJobId: null, currentTranscribeJobId: null, transcribingClipId: null, transcriptionMediaId: null, transcriptionSegments: [], transcriptionWords: [],
   transcriptionIndex: new Map(), transcriptSearchResults: [], transcriptSearchCursor: -1,
   visualTrackEls: [], audioTrackEls: [], visualLabelEls: [], audioLabelEls: [], cropActive: false, cropPreview: null,
+  flags: [], selectedFlagId: null, editingFlagId: null,
   noiseProfileId: null, noiseProfileMediaId: null, waveformData: null, waveformDecoding: false,
   timelineAudioPlayers: new Map(), visualScaleDrag: null, visualMoveDrag: null,
   previewLayers: new Map(), hiddenLayers: new Set(), importLayer: 'auto', timelineActive: false,
@@ -35,8 +35,28 @@ const elements = {
   timelineTracks: document.querySelector('#timeline-tracks'),
   timelineLabels: document.querySelector('.track-labels'),
   scroll: document.querySelector('#timeline-scroll'),
+  timelineDragbar: document.querySelector('#timeline-dragbar'),
+  timelineDragbarThumb: document.querySelector('#timeline-dragbar-thumb'),
   playhead: document.querySelector('#playhead'),
   playheadFollow: document.querySelector('#playhead-follow'),
+  snapGuide: document.querySelector('#snap-guide'),
+  flagLane: document.querySelector('#flag-lane'),
+  flagEditModal: document.querySelector('#flag-edit-modal'),
+  flagEditTime: document.querySelector('#flag-edit-time'),
+  flagEditNote: document.querySelector('#flag-edit-note'),
+  saveFlag: document.querySelector('#save-flag'),
+  deleteFlag: document.querySelector('#delete-flag'),
+  closeFlagEdit: document.querySelector('#close-flag-edit'),
+  qtFlag: document.querySelector('#qt-flag'),
+  qtFlagPrev: document.querySelector('#qt-flag-prev'),
+  qtFlagNext: document.querySelector('#qt-flag-next'),
+  flagPopover: document.querySelector('#flag-popover'),
+  flagPopoverAdd: document.querySelector('#flag-popover-add'),
+  flagSearchInput: document.querySelector('#flag-search-input'),
+  flagPopoverList: document.querySelector('#flag-popover-list'),
+  flagPopoverPrev: document.querySelector('#flag-popover-prev'),
+  flagPopoverNext: document.querySelector('#flag-popover-next'),
+  flagPopoverStatus: document.querySelector('#flag-popover-status'),
   timelineLinkConnectors: document.querySelector('#timeline-link-connectors'),
   visualTrack: document.querySelector('#visual-track'),
   transcriptionTrack: document.querySelector('#transcription-track'),
@@ -110,16 +130,28 @@ const elements = {
   transcribe: document.querySelector('#transcribe'),
   clipContextMenu: document.querySelector('#clip-context-menu'),
   separateFromAudio: document.querySelector('#separate-from-audio'),
+  editTranscription: document.querySelector('#edit-transcription'),
+  layerContextMenu: document.querySelector('#layer-context-menu'),
+  layerContextTitle: document.querySelector('#layer-context-title'),
+  layerForward: document.querySelector('#layer-forward'),
+  layerBackward: document.querySelector('#layer-backward'),
   transcriptSearchInput: document.querySelector('#transcript-search-input'),
   transcriptSearchPrevious: document.querySelector('#transcript-search-previous'),
   transcriptSearchNext: document.querySelector('#transcript-search-next'),
   transcriptSearchStatus: document.querySelector('#transcript-search-status'),
   transcriptSearchResults: document.querySelector('#transcript-search-results'),
   transcribeModal: document.querySelector('#transcribe-modal'),
+  transcribeLanguage: document.querySelector('#transcribe-language'),
+  startTranscribe: document.querySelector('#start-transcribe'),
   transcribeProgress: document.querySelector('#transcribe-progress'),
   transcribeMessage: document.querySelector('#transcribe-message'),
   cancelTranscribe: document.querySelector('#cancel-transcribe'),
   closeTranscribeModal: document.querySelector('#close-transcribe-modal'),
+  transcriptionEditModal: document.querySelector('#transcription-edit-modal'),
+  transcriptionEditTime: document.querySelector('#transcription-edit-time'),
+  transcriptionEditText: document.querySelector('#transcription-edit-text'),
+  saveTranscriptionEdit: document.querySelector('#save-transcription-edit'),
+  closeTranscriptionEdit: document.querySelector('#close-transcription-edit'),
   modal: document.querySelector('#export-modal'),
   exportTitle: document.querySelector('#export-title'),
   progress: document.querySelector('#export-progress'),
@@ -130,6 +162,10 @@ const elements = {
   historyToggle: document.querySelector('#history-toggle'),
   historyPanel: document.querySelector('#history-panel'),
   historyList: document.querySelector('#history-list'),
+  logToggle: document.querySelector('#log-toggle'),
+  logPanel: document.querySelector('#log-panel'),
+  logList: document.querySelector('#log-list'),
+  logClear: document.querySelector('#log-clear'),
   projectInput: document.querySelector('#project-input'),
   audioTools: document.querySelector('#audio-tools'),
   audioWaveform: document.querySelector('#audio-waveform'),
@@ -476,6 +512,17 @@ elements.audioWaveform.addEventListener('pointerup', (event) => {
   }
 });
 elements.transcriptSearchInput.addEventListener('input', updateTranscriptSearch);
+elements.transcriptSearchInput.addEventListener('focus', () => {
+  transcriptSearchFocused = true;
+  updateTranscriptSearch();
+});
+elements.transcriptSearchInput.addEventListener('blur', () => {
+  transcriptSearchFocused = false;
+  elements.transcriptSearchResults.hidden = true;
+});
+elements.transcriptSearchResults.addEventListener('mousedown', (event) => {
+  event.preventDefault();
+});
 elements.transcriptSearchInput.addEventListener('keydown', (event) => {
   if (event.key !== 'Enter') return;
   event.preventDefault();
@@ -489,8 +536,50 @@ elements.historyToggle.addEventListener('click', () => {
 });
 document.addEventListener('click', (e) => {
   if (!(e.target instanceof Element) || !e.target.closest('.history-wrap')) elements.historyPanel.hidden = true;
+  if (!(e.target instanceof Element) || !e.target.closest('.log-wrap')) elements.logPanel.hidden = true;
 });
 window.renderHistory = renderHistory;
+
+const processLog = [];
+const MAX_PROCESS_LOG = 200;
+
+function logProcess(message, level = 'ok') {
+  const entry = { time: new Date(), message, level };
+  processLog.push(entry);
+  if (processLog.length > MAX_PROCESS_LOG) processLog.shift();
+  renderProcessLog();
+  console.log(`[${level.toUpperCase()}] ${message}`);
+}
+
+function renderProcessLog() {
+  if (!elements.logList) return;
+  elements.logList.replaceChildren(...processLog.slice(-50).map((entry) => {
+    const row = document.createElement('div');
+    row.className = `log-entry log-entry-${entry.level}`;
+    const time = document.createElement('span');
+    time.className = 'log-entry-time';
+    time.textContent = entry.time.toLocaleTimeString('sv-SE', { hour12: false });
+    const msg = document.createElement('span');
+    msg.textContent = entry.message;
+    row.append(time, msg);
+    return row;
+  }));
+  if (elements.logPanel && !elements.logPanel.hidden) {
+    elements.logList.scrollTop = elements.logList.scrollHeight;
+  }
+}
+
+elements.logToggle.addEventListener('click', () => {
+  elements.logPanel.hidden = !elements.logPanel.hidden;
+  if (!elements.logPanel.hidden) {
+    renderProcessLog();
+    elements.logList.scrollTop = elements.logList.scrollHeight;
+  }
+});
+elements.logClear.addEventListener('click', () => {
+  processLog.length = 0;
+  renderProcessLog();
+});
 
 function setupMenus() {
   const menus = [...document.querySelectorAll('.menu')];
@@ -527,7 +616,30 @@ setupMenus();
 function hideClipContextMenu() {
   elements.clipContextMenu.hidden = true;
 }
+let contextMenuSegmentIndex = -1;
 elements.timeline.addEventListener('contextmenu', (event) => {
+  const transcriptionElement = event.target.closest('.clip.transcription[data-segment-index]');
+  if (transcriptionElement) {
+    const segmentIndex = Number(transcriptionElement.dataset.segmentIndex);
+    const segment = state.transcriptionSegments[segmentIndex];
+    if (!segment) {
+      hideClipContextMenu();
+      return;
+    }
+    event.preventDefault();
+    if (state.playing) stopPlayback();
+    contextMenuSegmentIndex = segmentIndex;
+    elements.transcribe.hidden = true;
+    elements.separateFromAudio.hidden = true;
+    elements.editTranscription.hidden = false;
+    elements.clipContextMenu.hidden = false;
+    const menuWidth = elements.clipContextMenu.offsetWidth || 180;
+    const menuHeight = elements.clipContextMenu.offsetHeight || 48;
+    elements.clipContextMenu.style.left = `${Math.max(4, Math.min(event.clientX, window.innerWidth - menuWidth - 4))}px`;
+    elements.clipContextMenu.style.top = `${Math.max(4, Math.min(event.clientY, window.innerHeight - menuHeight - 4))}px`;
+    elements.editTranscription.focus();
+    return;
+  }
   const clipElement = event.target.closest('.clip[data-id]');
   if (!clipElement) {
     hideClipContextMenu();
@@ -547,6 +659,7 @@ elements.timeline.addEventListener('contextmenu', (event) => {
   elements.separateFromAudio.hidden = isAudio;
   elements.transcribe.disabled = !isAudio;
   elements.transcribe.title = isAudio ? '' : 'Högerklicka på ett ljudklipp för att transkribera.';
+  elements.editTranscription.hidden = true;
   elements.clipContextMenu.hidden = false;
   const menuWidth = elements.clipContextMenu.offsetWidth || 180;
   const menuHeight = elements.clipContextMenu.offsetHeight || 48;
@@ -556,15 +669,109 @@ elements.timeline.addEventListener('contextmenu', (event) => {
 });
 document.addEventListener('pointerdown', (event) => {
   if (!(event.target instanceof Element) || !event.target.closest('#clip-context-menu')) hideClipContextMenu();
+  if (!(event.target instanceof Element) || !event.target.closest('#layer-context-menu')) hideLayerContextMenu();
 });
+
+function hideLayerContextMenu() {
+  elements.layerContextMenu.hidden = true;
+}
+
+function previewClipAtPoint(clientX, clientY) {
+  const element = document.elementFromPoint?.(clientX, clientY);
+  const media = element?.closest?.('[data-clip-id]');
+  if (media?.dataset.clipId) {
+    const clip = state.clips.find((item) => item.id === media.dataset.clipId);
+    if (clip && (clip.kind === 'video' || clip.kind === 'image')) return clip;
+  }
+  return timelineModel.topActiveVisual(state.clips, state.playhead) || null;
+}
+
+function overlappingLayerSiblings(clip) {
+  return state.clips
+    .filter((candidate) => {
+      if (candidate.id === clip.id) return false;
+      if (candidate.kind !== 'video' && candidate.kind !== 'image') return false;
+      if (!layerVisible(candidate.trackIndex || 0)) return false;
+      const candidateEnd = candidate.start + clipDuration(candidate);
+      const clipEnd = clip.start + clipDuration(clip);
+      return candidate.start < clipEnd && clip.start < candidateEnd;
+    })
+    .sort((a, b) => (a.trackIndex || 0) - (b.trackIndex || 0));
+}
+
+function moveClipLayer(clip, direction) {
+  const siblings = overlappingLayerSiblings(clip);
+  const currentTrack = clip.trackIndex || 0;
+  const target = direction > 0
+    ? siblings.find((candidate) => (candidate.trackIndex || 0) > currentTrack)
+    : siblings.reverse().find((candidate) => (candidate.trackIndex || 0) < currentTrack);
+  if (!target) return false;
+  recordHistory();
+  const targetTrack = target.trackIndex || 0;
+  clip.trackIndex = targetTrack;
+  target.trackIndex = currentTrack;
+  rebuildTrackLayout([clip.id, target.id]);
+  return true;
+}
+
+function showLayerContextMenu(event) {
+  const clip = previewClipAtPoint(event.clientX, event.clientY);
+  if (!clip) {
+    hideLayerContextMenu();
+    return;
+  }
+  event.preventDefault();
+  if (state.playing) stopPlayback();
+  selectClip(clip.id);
+  const currentTrack = clip.trackIndex || 0;
+  const siblings = overlappingLayerSiblings(clip);
+  const canForward = siblings.some((candidate) => (candidate.trackIndex || 0) > currentTrack);
+  const canBackward = siblings.some((candidate) => (candidate.trackIndex || 0) < currentTrack);
+  elements.layerContextTitle.textContent = `Lager V${currentTrack + 1} · ${clip.name}`;
+  elements.layerForward.disabled = !canForward;
+  elements.layerBackward.disabled = !canBackward;
+  elements.layerContextMenu.hidden = false;
+  const menuWidth = elements.layerContextMenu.offsetWidth || 180;
+  const menuHeight = elements.layerContextMenu.offsetHeight || 96;
+  elements.layerContextMenu.style.left = `${Math.max(4, Math.min(event.clientX, window.innerWidth - menuWidth - 4))}px`;
+  elements.layerContextMenu.style.top = `${Math.max(4, Math.min(event.clientY, window.innerHeight - menuHeight - 4))}px`;
+  (canForward ? elements.layerForward : elements.layerBackward).focus();
+}
+
+elements.previewWindow.addEventListener('contextmenu', showLayerContextMenu);
+elements.layerForward.addEventListener('click', () => {
+  const clip = state.clips.find((item) => item.id === state.selectedId && (item.kind === 'video' || item.kind === 'image'));
+  if (!clip) return;
+  moveClipLayer(clip, 1);
+  hideLayerContextMenu();
+});
+elements.layerBackward.addEventListener('click', () => {
+  const clip = state.clips.find((item) => item.id === state.selectedId && (item.kind === 'video' || item.kind === 'image'));
+  if (!clip) return;
+  moveClipLayer(clip, -1);
+  hideLayerContextMenu();
+});
+document.querySelector('#start-transcribe').addEventListener('click', startTranscription);
 document.querySelector('#cancel-transcribe').addEventListener('click', cancelTranscribeJob);
 document.querySelector('#close-transcribe-modal').addEventListener('click', () => {
   state.currentTranscribeJobId = null;
   elements.transcribeModal.hidden = true;
+  elements.startTranscribe.hidden = false;
+  elements.startTranscribe.disabled = false;
+  elements.transcribeLanguage.disabled = false;
   const clip = state.clips.find(c => c.id === state.transcribingClipId);
   if (clip) setClipTranscribeProgress(clip.id, null);
   state.transcribingClipId = null;
 });
+elements.editTranscription.addEventListener('click', () => {
+  hideClipContextMenu();
+  if (contextMenuSegmentIndex >= 0 && state.transcriptionSegments[contextMenuSegmentIndex]) {
+    openTranscriptionEditor(contextMenuSegmentIndex);
+  }
+  contextMenuSegmentIndex = -1;
+});
+document.querySelector('#save-transcription-edit').addEventListener('click', saveTranscriptionEdit);
+document.querySelector('#close-transcription-edit').addEventListener('click', closeTranscriptionEditor);
 document.querySelector('#cancel-export').addEventListener('click', cancelExport);
 document.querySelector('#close-modal').addEventListener('click', () => {
   state.currentJobId = null;
@@ -681,7 +888,8 @@ function editorSnapshot() {
     transcriptionMediaId: state.transcriptionMediaId,
     transcriptionSegments: cloneValue(state.transcriptionSegments),
     hiddenLayers: [...state.hiddenLayers],
-    exportWindow: state.exportWindow ? { ...state.exportWindow } : null
+    exportWindow: state.exportWindow ? { ...state.exportWindow } : null,
+    flags: cloneValue(state.flags)
   };
 }
 
@@ -759,8 +967,8 @@ function showSaveIndicator(text) {
   if (saveStatusTimeout) clearTimeout(saveStatusTimeout);
   saveStatusTimeout = setTimeout(() => {
     const nvenc = state.nvenc;
-    elements.status.textContent = nvenc ? 'NVIDIA NVENC redo' : 'CPU-export används';
-    elements.status.className = `status ${nvenc ? 'ok' : ''}`;
+    elements.status.textContent = nvenc ? 'NVIDIA CUDA/NVENC redo' : 'NVIDIA GPU krävs för MP4-export';
+    elements.status.className = `status ${nvenc ? 'ok' : 'warning'}`;
   }, 2000);
 }
 async function autoSaveProject() {
@@ -873,6 +1081,7 @@ function restoreEditor(snapshot) {
   state.canvas = snapshot.canvas ? { ...snapshot.canvas } : null;
   state.playhead = snapshot.playhead;
   state.hiddenLayers = new Set(Array.isArray(snapshot.hiddenLayers) ? snapshot.hiddenLayers : []);
+  state.flags = Array.isArray(snapshot.flags) ? cloneValue(snapshot.flags) : [];
   state.exportWindow = snapshot.exportWindow && snapshot.exportWindow.width
     ? { ...snapshot.exportWindow }
     : null;
@@ -884,6 +1093,7 @@ function restoreEditor(snapshot) {
   elements.audioTrack.replaceChildren();
   state.clips.forEach(createClipElement);
   renderTranscription();
+  renderFlags();
   const selectedId = state.clips.some((clip) => clip.id === snapshot.selectedId) ? snapshot.selectedId : null;
   selectClip(selectedId);
   syncLayerEye();
@@ -953,10 +1163,18 @@ async function initialize() {
   syncLayerEye();
   const saved = loadPersisted();
   if (saved) restoreEditor(saved);
+  renderFlags();
+  try {
+    const savedLanguage = localStorage.getItem('videoeditor:transcribe-language');
+    if (elements.transcribeLanguage && savedLanguage && ['auto', 'sv', 'en'].includes(savedLanguage)) {
+      elements.transcribeLanguage.value = savedLanguage;
+    }
+  } catch (_error) { /* lagring valfri */ }
   syncCanvasControls();
   loadHistory();
   if (editorHistory.undo.length === 0) recordHistory();
   requestAnimationFrame(updatePreviewWindowSize);
+  requestAnimationFrame(updateTimelineDragbar);
   if (saveTimer) clearInterval(saveTimer);
   if (!/jsdom/i.test(navigator.userAgent)) saveTimer = setInterval(autoSaveProject, 30000);
   if (!saved) {
@@ -971,9 +1189,9 @@ async function initialize() {
   try {
     const status = await api('/api/status');
     state.nvenc = status.nvenc;
-    elements.useNvidia.checked = status.nvenc;
-    elements.useNvidia.disabled = !status.nvenc;
-    elements.status.textContent = status.nvenc ? 'NVIDIA NVENC redo' : 'NVENC saknas – CPU-export används';
+    elements.useNvidia.checked = true;
+    elements.useNvidia.disabled = true;
+    elements.status.textContent = status.nvenc ? 'NVIDIA CUDA/NVENC redo' : 'NVIDIA GPU saknas – MP4-export blockerad';
     elements.status.className = `status ${status.nvenc ? 'ok' : 'warning'}`;
   } catch (error) {
     elements.status.textContent = error.message;
@@ -984,7 +1202,10 @@ async function initialize() {
 function buildRuler(duration = MIN_TIMELINE_SECONDS) {
   const ruler = document.querySelector('#ruler');
   const fragment = document.createDocumentFragment();
-  for (let second = 0; second <= duration; second += 5) {
+  const labelSpacing = 36;
+  const steps = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600];
+  const step = steps.find((candidate) => candidate * timelinePixelsPerSecond >= labelSpacing) || steps[steps.length - 1];
+  for (let second = 0; second <= duration; second += step) {
     const label = document.createElement('span');
     label.style.left = `${secondsToPixels(second)}px`;
     label.textContent = `${second}s`;
@@ -994,13 +1215,41 @@ function buildRuler(duration = MIN_TIMELINE_SECONDS) {
 }
 
 function updateTimelineWidth() {
-  const contentEnd = Math.max(projectEnd(), state.playhead);
+  const lastFlag = state.flags.reduce((max, flag) => Math.max(max, Number(flag.time) || 0), 0);
+  const contentEnd = Math.max(projectEnd(), state.playhead, lastFlag);
   const duration = Math.max(MIN_TIMELINE_SECONDS, Math.ceil((contentEnd + 5) / 5) * 5);
   const durationChanged = Number(elements.timeline.dataset.duration) !== duration;
   elements.timeline.dataset.duration = String(duration);
   elements.timeline.style.width = `${secondsToPixels(duration)}px`;
   if (durationChanged) buildRuler(duration);
   updatePlayheadFollowIndicator();
+  updateTimelineDragbar();
+  enforceMinTimelineZoom();
+}
+
+function timelineContentSeconds() {
+  const lastFlag = state.flags.reduce((max, flag) => Math.max(max, Number(flag.time) || 0), 0);
+  const contentEnd = Math.max(projectEnd(), state.playhead, lastFlag);
+  return Math.max(MIN_TIMELINE_SECONDS, contentEnd);
+}
+
+function minTimelineZoom() {
+  const viewportWidth = elements.scroll?.clientWidth || 800;
+  const contentSeconds = timelineContentSeconds();
+  const margin = 0.05;
+  return Math.max(0.02, (viewportWidth * (1 + margin)) / contentSeconds);
+}
+
+function enforceMinTimelineZoom() {
+  const min = minTimelineZoom();
+  if (timelinePixelsPerSecond >= min) return;
+  timelinePixelsPerSecond = min;
+  const duration = Number(elements.timeline.dataset.duration) || MIN_TIMELINE_SECONDS;
+  elements.timeline.style.width = `${secondsToPixels(duration)}px`;
+  buildRuler(duration);
+  renderAllClips();
+  renderTranscription();
+  elements.playhead.style.left = `${secondsToPixels(state.playhead)}px`;
 }
 
 function updatePlayheadFollowIndicator() {
@@ -1037,9 +1286,29 @@ function revealPlayhead() {
   updatePlayheadFollowIndicator();
 }
 
+function followPlayheadIntoView() {
+  const viewportWidth = elements.scroll.clientWidth;
+  if (!viewportWidth) return;
+  const contentWidth = elements.scroll.scrollWidth;
+  if (contentWidth <= viewportWidth + 1) return;
+  const playheadX = secondsToPixels(state.playhead);
+  const scrollLeft = elements.scroll.scrollLeft;
+  const margin = 48;
+  const visibleRight = scrollLeft + viewportWidth;
+  const isOutsideRight = playheadX >= visibleRight - margin;
+  const isOutsideLeft = playheadX <= scrollLeft + margin;
+  if (!isOutsideRight && !isOutsideLeft) return;
+  const target = clamp(
+    isOutsideRight ? playheadX - viewportWidth + margin : playheadX - margin,
+    0,
+    Math.max(0, contentWidth - viewportWidth)
+  );
+  elements.scroll.scrollLeft = target;
+}
+
 function updateTimelineZoom(nextScale, clientX) {
   const previousScale = timelinePixelsPerSecond;
-  const scale = clamp(nextScale, MIN_PX_PER_SECOND, MAX_PX_PER_SECOND);
+  const scale = clamp(nextScale, minTimelineZoom(), MAX_PX_PER_SECOND);
   if (Math.abs(scale - previousScale) < 0.01) return;
   const rect = elements.scroll.getBoundingClientRect();
   const pointerX = clamp(clientX - rect.left, 0, rect.width);
@@ -1048,8 +1317,9 @@ function updateTimelineZoom(nextScale, clientX) {
   const duration = Number(elements.timeline.dataset.duration) || MIN_TIMELINE_SECONDS;
   elements.timeline.style.width = `${secondsToPixels(duration)}px`;
   buildRuler(duration);
-  state.clips.forEach(renderClip);
+  renderAllClips();
   renderTranscription();
+  renderFlags();
   elements.playhead.style.left = `${secondsToPixels(state.playhead)}px`;
   elements.scroll.scrollLeft = Math.max(0, secondsToPixels(pointerTime) - pointerX);
 }
@@ -1063,10 +1333,70 @@ elements.scroll.addEventListener('wheel', (event) => {
 elements.scroll.addEventListener('scroll', () => {
   elements.timelineLabels.scrollTop = elements.scroll.scrollTop;
   updatePlayheadFollowIndicator();
+  updateTimelineDragbar();
   if (state.action?.type === 'marquee' && state.action.active) updateMarqueeSelection();
 });
+
+let dragbarDragging = false;
+
+function updateTimelineDragbar() {
+  const bar = elements.timelineDragbar;
+  const thumb = elements.timelineDragbarThumb;
+  if (!bar || !thumb) return;
+  const viewport = elements.scroll.clientWidth;
+  const content = elements.scroll.scrollWidth;
+  const maxScroll = content - viewport;
+  if (!viewport || maxScroll <= 1) {
+    bar.hidden = true;
+    return;
+  }
+  bar.hidden = false;
+  const trackWidth = bar.clientWidth;
+  const thumbWidth = Math.max(28, Math.round((viewport / content) * trackWidth));
+  thumb.style.width = `${thumbWidth}px`;
+  const maxThumbLeft = Math.max(0, trackWidth - thumbWidth);
+  thumb.style.left = `${(elements.scroll.scrollLeft / maxScroll) * maxThumbLeft}px`;
+}
+
+elements.timelineDragbar.addEventListener('mousedown', (event) => {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  const thumb = elements.timelineDragbarThumb;
+  const bar = elements.timelineDragbar;
+  const trackWidth = bar.clientWidth;
+  const thumbWidth = thumb.offsetWidth;
+  const maxScroll = elements.scroll.scrollWidth - elements.scroll.clientWidth;
+  if (!maxScroll || maxScroll <= 1) return;
+  const maxThumbLeft = trackWidth - thumbWidth;
+  const setFromClientX = (clientX) => {
+    const rect = bar.getBoundingClientRect();
+    const thumbCenter = clamp(clientX - rect.left - thumbWidth / 2, 0, maxThumbLeft);
+    elements.scroll.scrollLeft = (thumbCenter / maxThumbLeft) * maxScroll;
+  };
+  if (event.target === thumb) {
+    dragbarDragging = true;
+    const move = (moveEvent) => setFromClientX(moveEvent.clientX);
+    const up = () => {
+      dragbarDragging = false;
+      document.removeEventListener('mousemove', move);
+      document.removeEventListener('mouseup', up);
+    };
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+  } else {
+    setFromClientX(event.clientX);
+  }
+});
+document.addEventListener('mousemove', (event) => {
+  if (dragbarDragging) event.preventDefault();
+});
+
 elements.playheadFollow.addEventListener('click', revealPlayhead);
-window.addEventListener('resize', updatePlayheadFollowIndicator);
+window.addEventListener('resize', () => {
+  updatePlayheadFollowIndicator();
+  enforceMinTimelineZoom();
+  updateTimelineDragbar();
+});
 
 async function uploadFile(input) {
   const file = input.files?.[0];
@@ -1082,7 +1412,7 @@ async function uploadMedia(file) {
   try {
     const media = await api('/api/media', { method: 'POST', body: form });
     addMediaClip(media);
-    elements.status.textContent = state.nvenc ? 'NVIDIA NVENC redo' : 'Uppladdad – CPU-export används';
+    elements.status.textContent = state.nvenc ? 'NVIDIA CUDA/NVENC redo' : 'Uppladdad – NVIDIA GPU krävs för MP4-export';
   } catch (error) {
     alert(`Uppladdningen misslyckades: ${error.message}`);
     elements.status.textContent = error.message;
@@ -1166,6 +1496,7 @@ async function autoSplitAudio(videoClip) {
     state.clips.push(audioClip);
     renderClip(source);
     createClipElement(audioClip);
+    renderTimelineLinkConnectors();
     updateTimelineWidth();
     persist();
     return audioClip;
@@ -1224,10 +1555,34 @@ async function transcribeClip(clip) {
     return alert('Högerklicka på ett ljudklipp och välj Transkribera.');
   }
   state.transcribingClipId = clip.id;
-  setClipTranscribeProgress(clip.id, 0);
-  const mediaId = clip.mediaId;
   elements.transcribe.disabled = true;
   elements.transcribeModal.hidden = false;
+  elements.transcribeProgress.hidden = true;
+  elements.transcribeProgress.value = 0;
+  elements.transcribeMessage.textContent = 'Välj språk och tryck på Transkribera.';
+  elements.startTranscribe.hidden = false;
+  elements.startTranscribe.disabled = false;
+  elements.cancelTranscribe.hidden = true;
+  try {
+    const savedLanguage = localStorage.getItem('videoeditor:transcribe-language');
+    if (elements.transcribeLanguage && savedLanguage && ['auto', 'sv', 'en'].includes(savedLanguage)) {
+      elements.transcribeLanguage.value = savedLanguage;
+    }
+  } catch (_error) { /* lagring valfri */ }
+}
+
+async function startTranscription() {
+  const clip = state.clips.find((item) => item.id === state.transcribingClipId);
+  if (!clip || clip.kind !== 'audio' || !clip.mediaId) return;
+  setClipTranscribeProgress(clip.id, 0);
+  const mediaId = clip.mediaId;
+  const language = elements.transcribeLanguage ? elements.transcribeLanguage.value : 'auto';
+  try {
+    localStorage.setItem('videoeditor:transcribe-language', language);
+  } catch (_error) { /* lagring valfri */ }
+  elements.startTranscribe.disabled = true;
+  elements.transcribeLanguage.disabled = true;
+  elements.transcribeProgress.hidden = false;
   elements.transcribeProgress.value = 0;
   elements.transcribeMessage.textContent = 'Förbereder transkriberingen…';
   elements.cancelTranscribe.hidden = false;
@@ -1236,13 +1591,14 @@ async function transcribeClip(clip) {
     const job = await api(`/api/media/${encodeURIComponent(mediaId)}/transcribe`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'small', language: null })
+      body: JSON.stringify({ model: 'small', language: language === 'auto' ? null : language })
     });
     state.currentTranscribeJobId = job.id;
     pollTranscribeJob(job.id);
   } catch (error) {
     elements.transcribeMessage.textContent = `Kunde inte starta: ${error.message}`;
-    elements.transcribe.disabled = false;
+    elements.startTranscribe.disabled = false;
+    elements.transcribeLanguage.disabled = false;
     elements.cancelTranscribe.hidden = true;
   }
 }
@@ -1264,6 +1620,8 @@ async function pollTranscribeJob(id) {
       persist();
       elements.transcribeMessage.textContent = `Transkribering klar: ${state.transcriptionSegments.length} segment.`;
       elements.transcribe.disabled = false;
+      elements.startTranscribe.hidden = true;
+      elements.transcribeLanguage.disabled = false;
       elements.cancelTranscribe.hidden = true;
       return;
     }
@@ -1272,6 +1630,9 @@ async function pollTranscribeJob(id) {
       state.transcribingClipId = null;
       elements.transcribeMessage.textContent = `Transkriberingen misslyckades:\n${job.error}`;
       elements.transcribe.disabled = false;
+      elements.startTranscribe.hidden = false;
+      elements.startTranscribe.disabled = false;
+      elements.transcribeLanguage.disabled = false;
       elements.cancelTranscribe.hidden = true;
       return;
     }
@@ -1280,6 +1641,9 @@ async function pollTranscribeJob(id) {
       state.transcribingClipId = null;
       elements.transcribeMessage.textContent = 'Transkriberingen avbröts.';
       elements.transcribe.disabled = false;
+      elements.startTranscribe.hidden = false;
+      elements.startTranscribe.disabled = false;
+      elements.transcribeLanguage.disabled = false;
       elements.cancelTranscribe.hidden = true;
       return;
     }
@@ -1339,6 +1703,255 @@ function renderTranscription() {
   elements.transcriptionTrack.replaceChildren(...rendered);
   updateTranscriptSearch();
   updateTimelineWidth();
+}
+
+let transcriptionEditSegmentIndex = -1;
+let transcriptSearchFocused = false;
+
+function renderFlags() {
+  const lane = elements.flagLane;
+  if (!lane) return;
+  const fragment = document.createDocumentFragment();
+  const sorted = [...state.flags].sort((a, b) => a.time - b.time);
+  for (const flag of sorted) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'flag-marker';
+    if (flag.id === state.selectedFlagId) button.classList.add('current');
+    button.title = `${formatTime(flag.time)}${flag.note ? `\n${flag.note}` : ''}`;
+    button.style.left = `${secondsToPixels(flag.time)}px`;
+    button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-flag"></use></svg>';
+    button.addEventListener('mousedown', (event) => {
+      event.stopPropagation();
+    });
+    button.addEventListener('click', () => {
+      setPlayhead(flag.time);
+      selectFlag(flag.id);
+    });
+    button.addEventListener('dblclick', () => {
+      setPlayhead(flag.time);
+      openFlagEditor(flag.id);
+    });
+    button.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setPlayhead(flag.time);
+      selectFlag(flag.id);
+      openFlagEditor(flag.id);
+    });
+    fragment.appendChild(button);
+  }
+  lane.replaceChildren(fragment);
+  updatePlayheadFollowIndicator();
+}
+
+function selectFlag(id) {
+  state.selectedFlagId = id;
+  renderFlags();
+  if (elements.flagPopover && !elements.flagPopover.hidden) renderFlagPopover();
+}
+
+function addFlagAtPlayhead() {
+  recordHistory();
+  const flag = { id: crypto.randomUUID(), time: Math.max(0, state.playhead), note: '' };
+  state.flags.push(flag);
+  state.selectedFlagId = flag.id;
+  renderFlags();
+  openFlagEditor(flag.id);
+  return flag;
+}
+
+function openFlagEditor(id) {
+  const flag = state.flags.find((item) => item.id === id);
+  if (!flag) return;
+  state.editingFlagId = flag.id;
+  elements.flagEditTime.textContent = formatTime(flag.time);
+  elements.flagEditNote.value = flag.note || '';
+  elements.flagEditModal.hidden = false;
+  elements.flagEditNote.focus();
+}
+
+function closeFlagEditor() {
+  elements.flagEditModal.hidden = true;
+  state.editingFlagId = null;
+}
+
+function saveFlagEditor() {
+  const flag = state.flags.find((item) => item.id === state.editingFlagId);
+  if (flag) {
+    const note = elements.flagEditNote.value.trim();
+    if (note !== flag.note) {
+      recordHistory();
+      flag.note = note;
+      renderFlags();
+      persist();
+    }
+  }
+  closeFlagEditor();
+}
+
+function deleteFlagEditor() {
+  const flag = state.flags.find((item) => item.id === state.editingFlagId);
+  if (flag) {
+    recordHistory();
+    state.flags = state.flags.filter((item) => item.id !== flag.id);
+    if (state.selectedFlagId === flag.id) state.selectedFlagId = null;
+    renderFlags();
+    persist();
+  }
+  closeFlagEditor();
+}
+
+function deleteSelectedFlag() {
+  const flag = state.flags.find((item) => item.id === state.selectedFlagId);
+  if (!flag) return;
+  recordHistory();
+  state.flags = state.flags.filter((item) => item.id !== flag.id);
+  state.selectedFlagId = null;
+  renderFlags();
+  persist();
+}
+
+function jumpToFlag(direction) {
+  if (!state.flags.length) return;
+  const sorted = [...state.flags].sort((a, b) => a.time - b.time);
+  const current = state.playhead;
+  const next = direction > 0
+    ? sorted.find((flag) => flag.time > current + 0.001) || sorted[0]
+    : [...sorted].reverse().find((flag) => flag.time < current - 0.001) || sorted[sorted.length - 1];
+  setPlayhead(next.time);
+  selectFlag(next.id);
+}
+
+function toggleFlagPopover() {
+  elements.flagPopover.hidden = !elements.flagPopover.hidden;
+  elements.qtFlag.setAttribute('aria-expanded', String(!elements.flagPopover.hidden));
+  if (!elements.flagPopover.hidden) {
+    renderFlagPopover();
+    elements.flagSearchInput.focus();
+  }
+}
+
+function closeFlagPopover() {
+  elements.flagPopover.hidden = true;
+  elements.qtFlag.setAttribute('aria-expanded', 'false');
+}
+
+function renderFlagPopover() {
+  const list = elements.flagPopoverList;
+  if (!list) return;
+  const query = normalizeSearchWord(elements.flagSearchInput.value);
+  const sorted = [...state.flags].sort((a, b) => a.time - b.time);
+  const filtered = query
+    ? sorted.filter((flag) =>
+        normalizeSearchWord(flag.note || '').includes(query) ||
+        formatTime(flag.time).includes(query)
+      )
+    : sorted;
+  list.replaceChildren();
+  if (!filtered.length) {
+    const empty = document.createElement('div');
+    empty.className = 'flag-popover-empty';
+    empty.textContent = query ? 'Inga flaggor matchar sökningen.' : 'Inga flaggor ännu.';
+    list.appendChild(empty);
+  }
+  for (const flag of filtered) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'flag-popover-item';
+    if (flag.id === state.selectedFlagId) item.classList.add('current');
+    item.setAttribute('role', 'option');
+    const time = document.createElement('span');
+    time.className = 'flag-popover-item-time';
+    time.textContent = formatTime(flag.time);
+    const note = document.createElement('span');
+    note.className = `flag-popover-item-note${flag.note ? '' : ' empty'}`;
+    note.textContent = flag.note || '(ingen anteckning)';
+    item.append(time, note);
+    item.addEventListener('click', () => {
+      setPlayhead(flag.time);
+      selectFlag(flag.id);
+      closeFlagPopover();
+    });
+    item.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      closeFlagPopover();
+      setPlayhead(flag.time);
+      selectFlag(flag.id);
+      openFlagEditor(flag.id);
+    });
+    list.appendChild(item);
+  }
+  const count = filtered.length;
+  elements.flagPopoverStatus.value = count
+    ? `${count} flagg${count === 1 ? 'a' : 'or'}${query ? ' matchar' : ''}`
+    : '';
+  elements.flagPopoverPrev.disabled = sorted.length < 2;
+  elements.flagPopoverNext.disabled = sorted.length < 2;
+}
+
+elements.qtFlag.addEventListener('click', toggleFlagPopover);
+elements.flagPopoverAdd.addEventListener('click', () => {
+  closeFlagPopover();
+  addFlagAtPlayhead();
+});
+elements.flagSearchInput.addEventListener('input', renderFlagPopover);
+elements.flagPopoverPrev.addEventListener('click', () => { jumpToFlag(-1); renderFlagPopover(); });
+elements.flagPopoverNext.addEventListener('click', () => { jumpToFlag(1); renderFlagPopover(); });
+document.addEventListener('pointerdown', (event) => {
+  if (!(event.target instanceof Element)) return;
+  if (!event.target.closest('#flag-popover') && !event.target.closest('#qt-flag')) closeFlagPopover();
+});
+elements.saveFlag.addEventListener('click', saveFlagEditor);
+elements.deleteFlag.addEventListener('click', deleteFlagEditor);
+elements.closeFlagEdit.addEventListener('click', closeFlagEditor);
+
+function openTranscriptionEditor(segmentIndex) {
+  const segment = state.transcriptionSegments[segmentIndex];
+  if (!segment) return;
+  transcriptionEditSegmentIndex = segmentIndex;
+  elements.transcriptionEditTime.textContent =
+    `${formatTime(Number(segment.start) || 0)}–${formatTime(Number(segment.end) || 0)}`;
+  elements.transcriptionEditText.value = (segment.text || '').trim();
+  elements.transcriptionEditModal.hidden = false;
+  elements.transcriptionEditText.focus();
+}
+
+function closeTranscriptionEditor() {
+  elements.transcriptionEditModal.hidden = true;
+  transcriptionEditSegmentIndex = -1;
+}
+
+function saveTranscriptionEdit() {
+  const segmentIndex = transcriptionEditSegmentIndex;
+  const segment = state.transcriptionSegments[segmentIndex];
+  if (!segment) return;
+  const newText = elements.transcriptionEditText.value.trim();
+  if (!newText) {
+    elements.transcriptionEditText.focus();
+    return;
+  }
+  if (newText === (segment.text || '').trim()) {
+    closeTranscriptionEditor();
+    return;
+  }
+  recordHistory();
+  segment.text = newText;
+  const start = Number(segment.start) || 0;
+  const end = Number(segment.end) || start + 0.5;
+  const words = newText.split(/\s+/).filter(Boolean);
+  const span = Math.max(0.001, end - start);
+  segment.words = words.map((word, index) => ({
+    word,
+    start: Math.round((start + (span * index) / words.length) * 1000) / 1000,
+    end: Math.round((start + (span * (index + 1)) / words.length) * 1000) / 1000
+  }));
+  rebuildTranscriptionIndex();
+  renderTranscription();
+  renderTranscriptOverlay(state.playhead);
+  persist();
+  closeTranscriptionEditor();
 }
 
 function normalizeSearchWord(value) {
@@ -1417,7 +2030,7 @@ function updateTranscriptSearch() {
     button.addEventListener('click', () => activateTranscriptSearchResult(index));
     return button;
   }));
-  elements.transcriptSearchResults.hidden = !query || matches.length === 0;
+  elements.transcriptSearchResults.hidden = !transcriptSearchFocused || !query || matches.length === 0;
   const hasResults = matches.length > 0;
   elements.transcriptSearchPrevious.disabled = !hasResults;
   elements.transcriptSearchNext.disabled = !hasResults;
@@ -1512,7 +2125,7 @@ function addTextClip() {
   const clip = {
     id: crypto.randomUUID(), name: 'Text', kind: 'text', trackIndex: allocateTrack('text', start, end),
     mediaDuration: MAX_IMAGE_SECONDS, start, trimStart: 0, trimEnd: 4,
-    text: { text: 'Skriv din text här', fontSize: 0.08, color: '#FFFFFF', background: 'none', x: 0.5, y: 0.5 }
+    text: { text: 'Skriv din text här', presetId: 'simple', fontSize: 0.08, color: '#FFFFFF', background: 'none', x: 0.5, y: 0.5 }
   };
   state.clips.push(clip);
   createClipElement(clip);
@@ -2001,6 +2614,7 @@ function rebuildTrackLayout(liftedIds) {
   elements.transcriptionTrack.replaceChildren();
   elements.audioTrack.replaceChildren();
   state.clips.forEach(createClipElement);
+  renderTimelineLinkConnectors();
   renderTranscription();
   const validSelectedIds = state.clips.filter((clip) => selectedIds.has(clip.id)).map((clip) => clip.id);
   selectClips(validSelectedIds, validSelectedIds.includes(selectedId) ? selectedId : validSelectedIds[0] || null);
@@ -2092,6 +2706,10 @@ function syncClipTransitionControl(element, clip) {
 function renderClip(clip) {
   const element = document.querySelector(`.clip[data-id="${CSS.escape(clip.id)}"]`);
   if (!element) return;
+  overlayRenderCache.blur = '';
+  overlayRenderCache.color = '';
+  overlayRenderCache.text = '';
+  overlayRenderCache.html = '';
   element.style.left = `${secondsToPixels(clip.start)}px`;
   element.style.width = `${Math.max(8, secondsToPixels(clipDuration(clip)))}px`;
   element.classList.toggle('muted', clip.kind === 'video' && clip.muted === true);
@@ -2118,7 +2736,27 @@ function renderClip(clip) {
       element.insertBefore(canvas, element.firstChild);
     }
     drawTimelineWaveform(canvas, clip);
+  } else if (clip.kind === 'video') {
+    let canvas = element.querySelector('.clip-thumbs');
+    const displayWidth = Math.max(8, Math.round(secondsToPixels(clipDuration(clip)))) || 8;
+    const w = Math.min(12000, displayWidth);
+    const h = 60;
+    if (!canvas || canvas.width !== w || canvas.height !== h || canvas.style.width !== `${w}px`) {
+      if (canvas) canvas.remove();
+      canvas = document.createElement('canvas');
+      canvas.className = 'clip-thumbs';
+      canvas.width = w;
+      canvas.height = h;
+      canvas.style.width = `${w}px`;
+      canvas.style.height = '60px';
+      element.insertBefore(canvas, element.firstChild);
+    }
+    drawTimelineThumbnails(canvas, clip);
   }
+}
+
+function renderAllClips() {
+  state.clips.forEach(renderClip);
   renderTimelineLinkConnectors();
   updateTimelineWidth();
 }
@@ -2276,6 +2914,7 @@ function toggleSelectedLink() {
   pair.audio.linkGroupId = linkGroupId;
   renderClip(pair.video);
   renderClip(pair.audio);
+  renderTimelineLinkConnectors();
   persist();
   updateLinkTool();
 }
@@ -2548,7 +3187,18 @@ function normalizeColorBlock(rawColor) {
 }
 
 function normalizeRestoredClip(clip) {
+  if (!clip || typeof clip !== 'object') return clip;
+  if (clip.crop && typeof clip.crop === 'object') {
+    const cropValue = (value) => clamp(Number.isFinite(Number(value)) ? Number(value) : 0, 0, 0.95);
+    clip.crop = {
+      left: cropValue(clip.crop.left), right: cropValue(clip.crop.right),
+      top: cropValue(clip.crop.top), bottom: cropValue(clip.crop.bottom)
+    };
+  }
+  if (clip.kind === 'blur') clip.blur = normalizeBlur(clip.blur);
   if (clip?.kind === 'color') clip.color = normalizeColorBlock(clip.color);
+  if (clip.kind === 'text') clip.text = normalizeText(clip.text);
+  if (clip.kind === 'html') clip.html = normalizeHtml(clip.html);
   if (clip?.kind === 'video' || clip?.kind === 'image') {
     if (!Number.isFinite(clip.posX)) clip.posX = 0;
     if (!Number.isFinite(clip.posY)) clip.posY = 0;
@@ -2754,7 +3404,7 @@ function showTextSections(presetId) {
 }
 
 function defaultText() {
-  return { text: 'Skriv din text här', presetId: null, fontSize: 0.08, color: '#FFFFFF', background: 'none', x: 0.5, y: 0.5, scaleX: 1, animIn: null, animOut: null };
+  return { text: 'Skriv din text här', presetId: 'simple', fontSize: 0.08, color: '#FFFFFF', background: 'none', x: 0.5, y: 0.5, scaleX: 1, animIn: null, animOut: null };
 }
 
 function normalizeHtml(rawHtml) {
@@ -2778,7 +3428,7 @@ function normalizeText(rawText) {
   }
   return {
     text,
-    presetId: Object.hasOwn(TEXT_PRESETS, base.presetId) ? base.presetId : null,
+    presetId: Object.hasOwn(TEXT_PRESETS, base.presetId) ? base.presetId : 'simple',
     variant: 'standard',
     fontSize: clamp(Number(base.fontSize ?? 0.08), 0.01, 0.5),
     color: typeof base.color === 'string' ? base.color : '#FFFFFF',
@@ -3097,6 +3747,47 @@ function renderWaveform(clip) {
   ctx.fillText(`${formatTime(clip.trimEnd || clip.trimStart + duration)}`, w - 4, h - 4);
 }
 
+const waveformFetchQueue = [];
+let activeWaveformFetches = 0;
+const MAX_CONCURRENT_WAVEFORM_FETCHES = 2;
+
+function drainWaveformQueue() {
+  while (activeWaveformFetches < MAX_CONCURRENT_WAVEFORM_FETCHES && waveformFetchQueue.length > 0) {
+    const { url, entry } = waveformFetchQueue.shift();
+    activeWaveformFetches += 1;
+    const finish = () => {
+      activeWaveformFetches -= 1;
+      drainWaveformQueue();
+    };
+    const attempt = (n) => {
+      fetch(url)
+        .then((res) => {
+          if (res.status === 429 && n < 6) {
+            setTimeout(() => attempt(n + 1), Math.min(300 * (2 ** n), 5000));
+            return null;
+          }
+          if (!res.ok) throw new Error();
+          return res.json();
+        })
+        .then((data) => {
+          if (!data) return;
+          entry.loading = false;
+          entry.peaks = Array.isArray(data.peaks) ? data.peaks : null;
+          for (const cb of entry.callbacks) cb();
+          entry.callbacks = [];
+        })
+        .catch(() => {
+          entry.loading = false;
+          entry.peaks = null;
+          for (const cb of entry.callbacks) cb();
+          entry.callbacks = [];
+        })
+        .finally(finish);
+    };
+    attempt(0);
+  }
+}
+
 function getWaveformData(mediaId, start, end, width) {
   if (!mediaId) return null;
   const normalizedStart = Math.max(0, Number(start) || 0);
@@ -3111,20 +3802,9 @@ function getWaveformData(mediaId, start, end, width) {
     end: normalizedEnd.toFixed(3),
     width: String(normalizedWidth)
   });
-  fetch(`/api/media/${encodeURIComponent(mediaId)}/waveform?${params}`)
-    .then((res) => { if (!res.ok) throw new Error(); return res.json(); })
-    .then((data) => {
-      entry.loading = false;
-      entry.peaks = Array.isArray(data.peaks) ? data.peaks : null;
-      for (const cb of entry.callbacks) cb();
-      entry.callbacks = [];
-    })
-    .catch(() => {
-      entry.loading = false;
-      entry.peaks = null;
-      for (const cb of entry.callbacks) cb();
-      entry.callbacks = [];
-    });
+  const url = `/api/media/${encodeURIComponent(mediaId)}/waveform?${params}`;
+  waveformFetchQueue.push({ url, entry });
+  drainWaveformQueue();
   return entry;
 }
 
@@ -3176,6 +3856,84 @@ function drawTimelineWaveform(canvas, clip) {
     return;
   }
   drawWaveformPeaks(ctx, w, h, entry.peaks, '#4ade80');
+}
+
+const thumbnailImageCache = new Map();
+
+function drawTimelineThumbnails(canvas, clip) {
+  if (!canvas || canvas.width < 1 || canvas.height < 1) return;
+  let ctx;
+  try { ctx = canvas.getContext('2d'); } catch (e) { return; }
+  if (!ctx) return;
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.fillStyle = '#1a1d23';
+  ctx.fillRect(0, 0, w, h);
+  const boxW = 128;
+  const count = Math.max(1, Math.min(8, Math.floor(w / boxW)));
+  const frameWidth = Math.max(32, Math.min(320, Math.round(boxW / 32) * 32));
+  const clipStart = Math.max(0, Number(clip.trimStart) || 0);
+  const clipEnd = Math.max(clipStart + 0.2, Number(clip.trimEnd) || clipStart + 0.2);
+  const key = `${clip.mediaId}:${frameWidth}:${count}:${clipStart.toFixed(3)}:${clipEnd.toFixed(3)}`;
+  let image = thumbnailImageCache.get(key);
+  if (!image) {
+    const startedAt = performance.now();
+    image = new Image();
+    image.decoding = 'async';
+    image.onload = () => {
+      if (!thumbnailImageCache.has(key)) thumbnailImageCache.set(key, image);
+      const elapsed = Math.round(performance.now() - startedAt);
+      logProcess(`Previewbilder ${clip.name || clip.mediaId} · ${count} st · ${elapsed} ms`, 'ok');
+      const liveCanvas = document.querySelector(`.clip[data-id="${CSS.escape(clip.id)}"] .clip-thumbs`);
+      if (liveCanvas && liveCanvas.width === w && liveCanvas.height === h) {
+        const liveCtx = liveCanvas.getContext('2d');
+        if (liveCtx) drawThumbSprite(liveCtx, w, h, image, count);
+      }
+    };
+    image.onerror = () => {
+      logProcess(`Previewbilder misslyckades: ${clip.name || clip.mediaId}`, 'error');
+      ctx.fillStyle = '#1a1515';
+      ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = '#5a3a3a';
+      ctx.font = '10px system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillText('✕', w / 2, h / 2 + 3);
+    };
+    image.src = `/api/media/${encodeURIComponent(clip.mediaId)}/thumbs?width=${frameWidth}&count=${count}&start=${clipStart.toFixed(3)}&end=${clipEnd.toFixed(3)}`;
+    thumbnailImageCache.set(key, image);
+    return;
+  }
+  if (image.complete && image.naturalWidth > 0) drawThumbSprite(ctx, w, h, image, count);
+  else {
+    ctx.fillStyle = '#0d1f12';
+    ctx.font = '10px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText('⚇', w / 2, h / 2 + 3);
+  }
+}
+
+function drawThumbSprite(ctx, w, h, image, count) {
+  const spriteWidth = image.naturalWidth;
+  const spriteHeight = image.naturalHeight;
+  if (!spriteWidth || !spriteHeight) return;
+  const frameW = spriteWidth / count;
+  const frameH = spriteHeight;
+  const boxW = 128;
+  const boxH = h;
+  const totalW = boxW * count;
+  const offsetX = Math.max(0, Math.floor((w - totalW) / 2));
+  const scale = Math.min(boxW / frameW, boxH / frameH);
+  const drawW = frameW * scale;
+  const drawH = frameH * scale;
+  const dx = (boxW - drawW) / 2;
+  const dy = (boxH - drawH) / 2;
+  for (let i = 0; i < count; i += 1) {
+    ctx.drawImage(
+      image,
+      i * frameW, 0, frameW, frameH,
+      offsetX + i * boxW + dx, dy, drawW, drawH
+    );
+  }
 }
 
 async function captureNoisePrint() {
@@ -3290,7 +4048,31 @@ async function applyNoiseGate() {
   }
 }
 
+const overlayRenderCache = { blur: '', color: '', text: '', html: '' };
+
+function overlaySignature(kind, time) {
+  const active = state.clips.filter((clip) =>
+    clip.kind === kind && time >= clip.start && time < clip.start + clipDuration(clip) &&
+    layerVisible(clip.trackIndex || 0)
+  );
+  const model = active.map((clip) => {
+    const overlay = kind === 'blur' ? clip.blur
+      : kind === 'color' ? clip.color
+        : kind === 'text' ? clip.text
+          : kind === 'html' ? clip.html
+            : null;
+    return [clip.id, overlay];
+  }).sort((a, b) => a[0].localeCompare(b[0]));
+  const anims = active.some((clip) => clip.kind === 'text' && (clip.text?.animIn || clip.text?.animOut))
+    ? `:anim`
+    : '';
+  return `${JSON.stringify(model)}|${state.selectedId || ''}${anims}`;
+}
+
 function renderBlurOverlays(time) {
+  const signature = overlaySignature('blur', time);
+  if (signature === overlayRenderCache.blur) return;
+  overlayRenderCache.blur = signature;
   const active = state.clips.filter((clip) =>
     clip.kind === 'blur' && time >= clip.start && time < clip.start + clipDuration(clip) &&
     layerVisible(clip.trackIndex || 0)
@@ -3360,6 +4142,9 @@ function getColorLayer() {
 }
 
 function renderColorOverlays(time) {
+  const signature = overlaySignature('color', time);
+  if (signature === overlayRenderCache.color) return;
+  overlayRenderCache.color = signature;
   const layer = getColorLayer();
   const active = state.clips.filter((clip) =>
     clip.kind === 'color' && time >= clip.start && time < clip.start + clipDuration(clip) &&
@@ -3572,7 +4357,13 @@ function getTextLayer() {
 }
 
 function renderTextOverlays(time) {
+  const signature = overlaySignature('text', time);
   const layer = getTextLayer();
+  if (signature === overlayRenderCache.text) {
+    if (signature.includes(':anim')) updateTextOverlayAnimations(time);
+    return;
+  }
+  overlayRenderCache.text = signature;
   const previewHeight = elements.previewWindow.clientHeight || 1;
   const active = state.clips.filter((clip) =>
     clip.kind === 'text' && time >= clip.start && time < clip.start + clipDuration(clip) &&
@@ -3704,6 +4495,59 @@ function renderTextOverlays(time) {
   }
 }
 
+function updateTextOverlayAnimations(time) {
+  const layer = getTextLayer();
+  for (const box of layer.querySelectorAll('.text-overlay')) {
+    const clip = state.clips.find((c) => c.id === box.dataset.id && c.kind === 'text');
+    if (!clip) continue;
+    clip.text = normalizeText(clip.text);
+    const text = clip.text;
+    const elapsed = time - clip.start;
+    const duration = clipDuration(clip);
+    const inAnim = text.animIn;
+    const outAnim = text.animOut;
+    const effIn = inAnim ? Math.min(inAnim.duration, duration * 0.4) : 0;
+    const effOut = outAnim ? Math.min(outAnim.duration, duration * 0.3) : 0;
+    let opacity = 1;
+    let animTransform = '';
+    let displayText = text.text;
+    const inActive = inAnim && elapsed < effIn;
+    const outActive = outAnim && elapsed > duration - effOut;
+    if (inActive && !outActive) {
+      const progress = effIn > 0 ? clamp(elapsed / effIn, 0, 1) : 1;
+      const eased = 1 - Math.pow(1 - progress, 2);
+      if (inAnim.type === 'fade') { opacity = eased; }
+      else if (inAnim.type === 'slide-left') { animTransform = `translateX(${(1 - eased) * -100}%)`; }
+      else if (inAnim.type === 'slide-right') { animTransform = `translateX(${(1 - eased) * 100}%)`; }
+      else if (inAnim.type === 'slide-up') { animTransform = `translateY(${(1 - eased) * -100}%)`; }
+      else if (inAnim.type === 'slide-down') { animTransform = `translateY(${(1 - eased) * 100}%)`; }
+      else if (inAnim.type === 'scale') { animTransform = `scale(${eased})`; }
+      else if (inAnim.type === 'typewriter') { displayText = text.text.slice(0, Math.ceil(eased * text.text.length)) || ' '; }
+    }
+    if (outActive) {
+      const outProgress = effOut > 0 ? clamp((elapsed - (duration - effOut)) / effOut, 0, 1) : 1;
+      const eased = 1 - Math.pow(1 - outProgress, 2);
+      if (outAnim.type === 'fade') { opacity = 1 - eased; }
+      else if (outAnim.type === 'slide-left') { animTransform = `translateX(${eased * -100}%)`; }
+      else if (outAnim.type === 'slide-right') { animTransform = `translateX(${eased * 100}%)`; }
+      else if (outAnim.type === 'slide-up') { animTransform = `translateY(${eased * -100}%)`; }
+      else if (outAnim.type === 'slide-down') { animTransform = `translateY(${eased * 100}%)`; }
+      else if (outAnim.type === 'scale') { animTransform = `scale(${1 - eased})`; }
+      else if (outAnim.type === 'typewriter') { displayText = text.text.slice(0, Math.ceil((1 - eased) * text.text.length)) || ' '; }
+    }
+    if (opacity < 1 || animTransform || (text.scaleX && text.scaleX !== 1)) {
+      box.style.opacity = String(opacity);
+      const base = `translate(-50%, -50%)`;
+      const scale = (text.scaleX && text.scaleX !== 1) ? ` scale(${text.scaleX})` : '';
+      box.style.transform = `${base}${scale}${animTransform ? ' ' + animTransform : ''}`;
+    } else {
+      box.style.opacity = '';
+      box.style.transform = '';
+    }
+    box.textContent = displayText;
+  }
+}
+
 function getHtmlLayer() {
   let layer = elements.previewWindow.querySelector('.html-layer');
   if (!layer) {
@@ -3715,6 +4559,9 @@ function getHtmlLayer() {
 }
 
 function renderHtmlOverlays(time) {
+  const signature = overlaySignature('html', time);
+  if (signature === overlayRenderCache.html) return;
+  overlayRenderCache.html = signature;
   const layer = getHtmlLayer();
   const active = state.clips.filter((clip) =>
     clip.kind === 'html' && time >= clip.start && time < clip.start + clipDuration(clip) &&
@@ -4210,7 +5057,7 @@ function renderLayerMedia(time, playing = false) {
     const targetTime = clamp(sourceTime, 0, clip.mediaDuration);
     if (state.playing && playing) {
       if (element.readyState >= 1) {
-        if (Math.abs((element.currentTime || 0) - targetTime) > 0.4) seekVideoElement(element, targetTime);
+        if (Math.abs((element.currentTime || 0) - targetTime) > 0.15) seekVideoElement(element, targetTime);
       } else {
         element.addEventListener('loadedmetadata', () => seekVideoElement(element, targetTime), { once: true });
       }
@@ -4352,7 +5199,7 @@ function maxTrackFor(time, kinds) {
   return max;
 }
 
-const OVERLAY_BASE = { 'color-layer': 2, 'blur-layer': 3, 'text-layer': 4, 'html-layer': 5 };
+const OVERLAY_BASE = { 'color-layer': 2, 'blur-layer': 3, 'text-layer': 4, 'html-layer': 5, 'transcript-overlay': 6 };
 function setOverlayZ(className, maxTrack) {
   const el = className === 'blur-layer' ? elements.blurLayer : elements.previewWindow.querySelector('.' + className);
   if (el) el.style.zIndex = String(OVERLAY_BASE[className] + maxTrack * 10);
@@ -4372,6 +5219,7 @@ function syncPlaybackMedia(time) {
   setOverlayZ('blur-layer', maxBlur);
   setOverlayZ('text-layer', maxText);
   setOverlayZ('html-layer', maxHtml);
+  setOverlayZ('transcript-overlay', maxTrackFor(time, ['video', 'image', 'color', 'blur', 'text', 'html']));
   renderBlurOverlays(time);
   renderColorOverlays(time);
   renderTextOverlays(time);
@@ -4393,10 +5241,11 @@ function syncPlaybackMedia(time) {
   for (const audio of activeAudio) {
     const player = timelineAudioPlayer(audio);
     const sourceTime = audio.trimStart + time - audio.start;
+    const targetTime = clamp(sourceTime, 0, audio.mediaDuration);
     const changed = player.dataset.mediaId !== audio.mediaId;
     const seek = () => {
       try {
-        player.currentTime = clamp(sourceTime, 0, audio.mediaDuration);
+        player.currentTime = targetTime;
       } catch (_error) { /* metadata laddas fortfarande */ }
     };
     if (changed) {
@@ -4404,10 +5253,10 @@ function syncPlaybackMedia(time) {
       player.dataset.mediaId = audio.mediaId;
       if (player.readyState >= 1) seek();
       else player.addEventListener('loadedmetadata', seek, { once: true });
-    } else if (player.readyState >= 1 && Math.abs(player.currentTime - sourceTime) > 0.5) {
+    } else if (player.readyState >= 1 && Math.abs(player.currentTime - targetTime) > 0.15) {
       seek();
     }
-    player.play().catch(() => {});
+    if (player.paused) player.play().catch(() => {});
   }
 }
 
@@ -4417,6 +5266,7 @@ function setPlayhead(seconds, updatePreview = true) {
   elements.playhead.style.left = `${secondsToPixels(state.playhead)}px`;
   updatePlayheadFollowIndicator();
   elements.timecode.textContent = formatTime(state.playhead);
+  followPlayheadIntoView();
   if (!updatePreview) return;
   const p = state.playhead;
   const base = timelineModel.topActiveVisual(state.clips, p);
@@ -4427,6 +5277,7 @@ function setPlayhead(seconds, updatePreview = true) {
   setOverlayZ('blur-layer', maxTrackFor(p, ['blur']));
   setOverlayZ('text-layer', maxTrackFor(p, ['text']));
   setOverlayZ('html-layer', maxTrackFor(p, ['html']));
+  setOverlayZ('transcript-overlay', maxTrackFor(p, ['video', 'image', 'color', 'blur', 'text', 'html']));
   renderBlurOverlays(state.playhead);
   renderColorOverlays(state.playhead);
   renderTextOverlays(state.playhead);
@@ -4617,6 +5468,10 @@ elements.timeline.addEventListener('mousedown', (event) => {
     const point = timelinePointFromClient(event.clientX, event.clientY);
     setPlayhead(pixelsToSeconds(point.x));
     selectClip(null);
+    if (state.selectedFlagId) {
+      state.selectedFlagId = null;
+      renderFlags();
+    }
   }
   if (state.action) event.preventDefault();
 });
@@ -4654,6 +5509,48 @@ function moveDraggedVisualClipsToTrack(action, targetTrackIndex) {
   return true;
 }
 
+const SNAP_PX = 8;
+
+function snapCandidates() {
+  const times = new Set();
+  for (const clip of state.clips) {
+    if (state.action?.movingClips?.some((item) => item.clip.id === clip.id)) continue;
+    times.add(clip.start);
+    times.add(clip.start + clipDuration(clip));
+  }
+  times.add(state.playhead);
+  times.add(0);
+  return [...times];
+}
+
+function snapDelta(movingClips, proposedDelta) {
+  const threshold = Math.max(pixelsToSeconds(SNAP_PX), 1 / 30);
+  const candidates = snapCandidates();
+  let best = null;
+  for (const item of movingClips) {
+    const start = item.originalStart + proposedDelta;
+    const end = start + clipDuration(item.clip);
+    for (const candidate of candidates) {
+      for (const edge of [start, end]) {
+        const diff = candidate - edge;
+        if (Math.abs(diff) <= threshold && (!best || Math.abs(diff) < Math.abs(best.diff))) {
+          best = { diff, time: candidate };
+        }
+      }
+    }
+  }
+  return best;
+}
+
+function showSnapGuide(time) {
+  elements.snapGuide.hidden = false;
+  elements.snapGuide.style.left = `${secondsToPixels(time)}px`;
+}
+
+function hideSnapGuide() {
+  if (elements.snapGuide) elements.snapGuide.hidden = true;
+}
+
 document.addEventListener('mousemove', (event) => {
   if (!state.action) return;
   if (state.action.type === 'marquee') {
@@ -4680,7 +5577,14 @@ document.addEventListener('mousemove', (event) => {
   }
   if (action.type === 'drag') {
     const minimumStart = Math.min(...action.movingClips.map((item) => item.originalStart));
-    const actualDelta = Math.max(-minimumStart, delta);
+    let actualDelta = Math.max(-minimumStart, delta);
+    const snap = snapDelta(action.movingClips, actualDelta);
+    if (snap) {
+      actualDelta += snap.diff;
+      showSnapGuide(snap.time);
+    } else {
+      hideSnapGuide();
+    }
     for (const moving of action.movingClips) {
       moving.clip.start = moving.originalStart + actualDelta;
       if (moving.clip.transitionIn && Number.isFinite(moving.originalTransitionCut)) {
@@ -4735,6 +5639,7 @@ document.addEventListener('mouseup', () => {
     finishMarquee(action);
     return;
   }
+  hideSnapGuide();
   const completedAction = state.action;
   const changedClip = completedAction?.clip;
   const changedClips = completedAction?.movingClips?.map((item) => item.clip) || (changedClip ? [changedClip] : []);
@@ -4751,15 +5656,43 @@ function splitSelectedClip() {
   const selectedIds = state.selectedIds.size
     ? new Set(state.selectedIds)
     : new Set(state.selectedId ? [state.selectedId] : []);
-  if (!selectedIds.size) return alert('Markera först klippen som ska delas.');
+  if (!selectedIds.size) {
+    splitAllClipsAtPlayhead();
+    return;
+  }
 
-  const targets = state.clips.filter((clip) => {
+  const targetIds = new Set(state.clips.filter((clip) => {
     if (!selectedIds.has(clip.id)) return false;
     const offset = state.playhead - clip.start;
     return offset > MIN_CLIP_SECONDS && offset < clipDuration(clip) - MIN_CLIP_SECONDS;
-  });
+  }).map((clip) => clip.id));
+  for (const clip of state.clips) {
+    if (!targetIds.has(clip.id) || !clip.linkGroupId) continue;
+    for (const partner of state.clips) {
+      if (partner.linkGroupId !== clip.linkGroupId) continue;
+      const offset = state.playhead - partner.start;
+      if (offset > MIN_CLIP_SECONDS && offset < clipDuration(partner) - MIN_CLIP_SECONDS) {
+        targetIds.add(partner.id);
+      }
+    }
+  }
+  const targets = state.clips.filter((clip) => targetIds.has(clip.id));
   if (!targets.length) return alert('Placera spelhuvudet inuti minst ett markerat klipp.');
 
+  splitClipsAtPlayhead(targets);
+}
+
+function splitAllClipsAtPlayhead() {
+  const targets = state.clips.filter((clip) => {
+    const offset = state.playhead - clip.start;
+    return offset > MIN_CLIP_SECONDS && offset < clipDuration(clip) - MIN_CLIP_SECONDS;
+  });
+  if (!targets.length) return alert('Placera spelhuvudet inuti minst ett klipp.');
+  splitClipsAtPlayhead(targets);
+  selectClips([], null);
+}
+
+function splitClipsAtPlayhead(targets) {
   recordHistory();
 
   const targetIds = new Set(targets.map((clip) => clip.id));
@@ -4901,7 +5834,10 @@ function handleKeyboardShortcut(event) {
 
   if (textEntry || event.altKey || modifier) return;
   const formControl = event.target instanceof Element && event.target.matches('input, select, textarea');
-  if ((key === 'delete' || key === 'backspace') && state.selectedId) {
+  if ((key === 'delete' || key === 'backspace') && state.selectedFlagId) {
+    event.preventDefault();
+    deleteSelectedFlag();
+  } else if ((key === 'delete' || key === 'backspace') && state.selectedId) {
     event.preventDefault();
     removeSelectedClip();
   } else if (key === ' ' && !formControl) {
@@ -4910,6 +5846,12 @@ function handleKeyboardShortcut(event) {
   } else if (key === 's' && !formControl) {
     event.preventDefault();
     splitSelectedClip();
+  } else if (key === 'f' && !formControl) {
+    event.preventDefault();
+    addFlagAtPlayhead();
+  } else if ((key === '[' || key === ']') && !formControl) {
+    event.preventDefault();
+    jumpToFlag(key === ']' ? 1 : -1);
   } else if ((key === 'arrowleft' || key === 'arrowright') && !formControl) {
     event.preventDefault();
     if (state.playing) stopPlayback();
@@ -4924,6 +5866,9 @@ function handleKeyboardShortcut(event) {
     setPlayhead(projectEnd());
   } else if (key === 'escape') {
     if (!elements.clipContextMenu.hidden) hideClipContextMenu();
+    else if (!elements.layerContextMenu.hidden) hideLayerContextMenu();
+    else if (!elements.flagEditModal.hidden) closeFlagEditor();
+    else if (!elements.flagPopover.hidden) closeFlagPopover();
     else if (!elements.modal.hidden) elements.modal.hidden = true;
     else selectClip(null);
   }
@@ -4973,7 +5918,7 @@ async function exportProject(format) {
         format: normalizedFormat,
         canvas: exportCanvas,
         quality: normalizedFormat === 'mp4' ? Number(elements.exportQuality.value) : null,
-        hardware: normalizedFormat === 'mp4' && elements.useNvidia.checked ? 'nvidia' : 'cpu',
+        hardware: normalizedFormat === 'mp4' ? 'nvidia' : 'cpu',
         upscale: normalizedFormat === 'mp4' && elements.useUpscale.checked,
         hiddenLayers: [...state.hiddenLayers],
         subtitles: normalizedFormat === 'mp4' ? exportSubtitleCues() : null,
@@ -5011,11 +5956,21 @@ function formatEta(seconds) {
 async function pollJob(id) {
   try {
     const job = await api(`/api/jobs/${encodeURIComponent(id)}`);
-    elements.progress.value = job.progress || 0;
+    const indeterminate = job.status === 'rendering' && !(job.progress > 0) &&
+      ['prepare', 'html-render', 'seek-decode'].includes(job.phase);
+    if (indeterminate) elements.progress.removeAttribute('value');
+    else elements.progress.value = job.progress || 0;
     const eta = formatEta(job.etaSeconds);
+    const phaseMessage = job.phase === 'prepare'
+      ? 'Verifierar NVIDIA CUDA och förbereder exporten…'
+      : job.phase === 'html-render'
+        ? 'Renderar HTML-lager före GPU-exporten…'
+        : job.phase === 'seek-decode' && !(job.progress > 0)
+          ? 'CUDA/NVDEC söker direkt till klippens startpunkter…'
+          : null;
     elements.exportMessage.textContent = job.status === 'queued'
       ? 'Väntar på FFmpeg…'
-      : `${job.encoder || 'FFmpeg'} · ${job.progress || 0} %${eta ? ` · ${eta}` : ''}`;
+      : phaseMessage || `${job.encoder || 'FFmpeg'} · ${job.progress || 0} %${eta ? ` · ${eta}` : ''}`;
     if (job.status === 'completed') {
       elements.exportMessage.textContent = `Klar med ${job.encoder}.`;
       elements.download.href = `/api/jobs/${encodeURIComponent(id)}/download`;
@@ -5067,6 +6022,9 @@ function newProject(options = {}) {
   state.transcriptionIndex = new Map();
   state.transcriptSearchResults = [];
   state.transcriptSearchCursor = -1;
+  state.flags = [];
+  state.selectedFlagId = null;
+  state.editingFlagId = null;
   state.currentJobId = null;
   state.currentTranscribeJobId = null;
   state.transcribingClipId = null;
@@ -5076,6 +6034,7 @@ function newProject(options = {}) {
   elements.audioTrack.replaceChildren();
   elements.transcriptSearchInput.value = '';
   updateTranscriptSearch();
+  renderFlags();
   hideClipContextMenu();
   hideCropOverlay();
   elements.cropTools.hidden = true;
@@ -5092,19 +6051,7 @@ function newProject(options = {}) {
 }
 
 function saveProject() {
-  const data = {
-    version: 2,
-    createdAt: new Date().toISOString(),
-    canvas: state.canvas ? { ...state.canvas } : null,
-    hiddenLayers: [...state.hiddenLayers],
-    exportWindow: state.exportWindow ? { ...state.exportWindow } : null,
-    playhead: state.playhead,
-    transcriptionMediaId: state.transcriptionMediaId,
-    transcriptionSegments: state.transcriptionSegments,
-    clips: state.clips.map(({ mediaId, mediaDuration, sourceWidth, sourceHeight, kind, start, trimStart, trimEnd, crop, blur, text, muted, trackIndex, name, linkGroupId, transitionIn, visualScale, animIn, posX, posY, circular }) =>
-      ({ mediaId, mediaDuration, sourceWidth, sourceHeight, kind, start, trimStart, trimEnd, crop, blur, text, muted, trackIndex, name, linkGroupId, transitionIn, visualScale, animIn, posX, posY, circular })
-    )
-  };
+  const data = buildProjectFile();
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -5112,6 +6059,74 @@ function saveProject() {
   a.download = `videoeditor-projekt-${new Date().toISOString().slice(0, 10)}.json`;
   a.click();
   URL.revokeObjectURL(url);
+  showSaveIndicator('Projektfil sparad');
+}
+
+const PROJECT_FILE_VERSION = 3;
+
+function buildProjectFile() {
+  return {
+    version: PROJECT_FILE_VERSION,
+    createdAt: new Date().toISOString(),
+    ...editorSnapshot()
+  };
+}
+
+function projectSnapshotFromData(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data) || !Array.isArray(data.clips)) {
+    throw new Error('Ogiltig projektfil');
+  }
+  const version = data.version == null ? 1 : Number(data.version);
+  if (!Number.isInteger(version) || version < 1) throw new Error('Ogiltig projektversion');
+  if (version > PROJECT_FILE_VERSION) {
+    throw new Error(`Projektfilen kräver en nyare editor (version ${version})`);
+  }
+
+  const validKinds = new Set(['video', 'audio', 'image', 'text', 'blur', 'color', 'html']);
+  const usedIds = new Set();
+  const clips = data.clips.map((rawClip, index) => {
+    if (!rawClip || typeof rawClip !== 'object' || Array.isArray(rawClip) || !validKinds.has(rawClip.kind)) {
+      throw new Error(`Ogiltigt klipp på position ${index + 1}`);
+    }
+    const clip = cloneValue(rawClip);
+    const rawId = typeof clip.id === 'string' && clip.id ? clip.id : null;
+    clip.id = rawId && !usedIds.has(rawId) ? rawId : crypto.randomUUID();
+    usedIds.add(clip.id);
+    clip.start = Number.isFinite(Number(clip.start)) ? Math.max(0, Number(clip.start)) : 0;
+    clip.trimStart = Number.isFinite(Number(clip.trimStart)) ? Math.max(0, Number(clip.trimStart)) : 0;
+    clip.trimEnd = Number.isFinite(Number(clip.trimEnd))
+      ? Math.max(clip.trimStart + MIN_CLIP_SECONDS, Number(clip.trimEnd))
+      : clip.trimStart + 3;
+    clip.mediaDuration = Number.isFinite(Number(clip.mediaDuration)) && Number(clip.mediaDuration) > 0
+      ? Number(clip.mediaDuration)
+      : Math.max(clip.trimEnd, 3);
+    clip.trackIndex = Number.isFinite(Number(clip.trackIndex)) ? Math.max(0, Math.trunc(Number(clip.trackIndex))) : 0;
+    return normalizeRestoredClip(clip);
+  });
+
+  const finiteOr = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+  const canvas = data.canvas && finiteOr(data.canvas.width) > 0 && finiteOr(data.canvas.height) > 0
+    ? { width: finiteOr(data.canvas.width), height: finiteOr(data.canvas.height) }
+    : null;
+  const exportWindow = data.exportWindow && finiteOr(data.exportWindow.width) > 0 && finiteOr(data.exportWindow.height) > 0
+    ? {
+        x: finiteOr(data.exportWindow.x), y: finiteOr(data.exportWindow.y),
+        width: finiteOr(data.exportWindow.width), height: finiteOr(data.exportWindow.height)
+      }
+    : null;
+  return {
+    clips,
+    selectedId: clips.some((clip) => clip.id === data.selectedId) ? data.selectedId : null,
+    playhead: Math.max(0, finiteOr(data.playhead)),
+    canvas,
+    transcriptionMediaId: typeof data.transcriptionMediaId === 'string' ? data.transcriptionMediaId : null,
+    transcriptionSegments: Array.isArray(data.transcriptionSegments) ? cloneValue(data.transcriptionSegments) : [],
+    hiddenLayers: Array.isArray(data.hiddenLayers)
+      ? data.hiddenLayers.map(Number).filter((value) => Number.isInteger(value) && value >= 0)
+      : [],
+    exportWindow,
+    flags: Array.isArray(data.flags) ? cloneValue(data.flags) : []
+  };
 }
 
 async function loadProject() {
@@ -5120,40 +6135,14 @@ async function loadProject() {
   try {
     const text = await file.text();
     const data = JSON.parse(text);
-    if (!data.clips || !Array.isArray(data.clips)) throw new Error('Ogiltig projektfil');
+    const snapshot = projectSnapshotFromData(data);
     if (state.clips.length > 0 && !confirm('Öppna projekt? Nuvarande projekt ersätts.')) return;
     newProject({ skipConfirmation: true });
-    state.transcriptionMediaId = data.transcriptionMediaId || null;
-    state.transcriptionSegments = Array.isArray(data.transcriptionSegments) ? data.transcriptionSegments : [];
-    rebuildTranscriptionIndex();
+    restoreEditor(snapshot);
     syncExportSubtitlesPrefill();
-    state.clips = timelineModel.compactTrackAssignments(data.clips.map((clip) => {
-      if (clip.crop && typeof clip.crop === 'object') clip.crop = { left: clip.crop.left || 0, right: clip.crop.right || 0, top: clip.crop.top || 0, bottom: clip.crop.bottom || 0 };
-      if (clip.blur) clip.blur = normalizeBlur(clip.blur);
-      return normalizeRestoredClip({ id: crypto.randomUUID(), ...clip });
-    }));
-    state.selectedId = null;
-    state.selectedIds = new Set();
-    state.hiddenLayers = new Set(Array.isArray(data.hiddenLayers) ? data.hiddenLayers.map(Number).filter(Number.isFinite) : []);
-    state.canvas = data.canvas && data.canvas.width ? { width: data.canvas.width, height: data.canvas.height } : null;
-    state.exportWindow = data.exportWindow && data.exportWindow.width
-      ? { x: data.exportWindow.x || 0, y: data.exportWindow.y || 0, width: data.exportWindow.width, height: data.exportWindow.height }
-      : null;
-    syncCanvasControls();
-    clearDynamicTracks();
-    elements.visualTrack.replaceChildren();
-    elements.transcriptionTrack.replaceChildren();
-    elements.audioTrack.replaceChildren();
-  state.clips.forEach(createClipElement);
-  renderTimelineLinkConnectors();
-  renderTranscription();
-    selectClip(null);
-    syncLayerEye();
-    setPlayhead(data.playhead || 0);
-    updateTimelineWidth();
     warmPreview();
-    updatePreviewWindowSize();
     recordHistory();
+    showSaveIndicator('Projekt importerat');
   } catch (error) {
     alert(`Kunde inte öppna projektet: ${error.message}`);
   } finally {
