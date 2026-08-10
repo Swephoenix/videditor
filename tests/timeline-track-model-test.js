@@ -64,6 +64,20 @@ assert.deepStrictEqual(
   'Överlappande klipp får unika trackIndex.'
 );
 
+const frameStart = 1 / 30;
+const frameTrimStart = 2 / 30;
+const framePlayhead = 3 / 30;
+const frameSourceSplit = frameTrimStart + framePlayhead - frameStart;
+const splitAtFrame = compactTrackAssignments([
+  { id: 'split-left', kind: 'video', start: frameStart, trimStart: frameTrimStart, trimEnd: frameSourceSplit, trackIndex: 0 },
+  { id: 'split-right', kind: 'video', start: framePlayhead, trimStart: frameSourceSplit, trimEnd: frameSourceSplit + 1, trackIndex: 0 }
+]);
+assert.deepStrictEqual(
+  splitAtFrame.map((item) => [item.id, item.trackIndex]),
+  [['split-left', 0], ['split-right', 0]],
+  'Flyttalsavrundning vid delning får inte flytta högerhalvan till V2.'
+);
+
 const lifted = compactTrackAssignments([
   clip('video', 0, 4, 0, 'top'),
   clip('video', 0, 4, 0, 'bottom')
@@ -82,6 +96,16 @@ assert.deepStrictEqual(
   denseTracks.map((item) => [item.id, item.trackIndex]),
   [['gap-bottom', 0], ['gap-top', 1]],
   'Tomma spår ska kompakteras utan att basspåret byts ut.'
+);
+
+const denseAudioTracks = compactTrackAssignments([
+  clip('audio', 0, 4, 1, 'audio-lower'),
+  clip('audio', 4, 8, 3, 'audio-upper')
+]);
+assert.deepStrictEqual(
+  denseAudioTracks.map((item) => [item.id, item.trackIndex]),
+  [['audio-lower', 1], ['audio-upper', 3]],
+  'Ljudspårens explicita placering ska bevaras efter dragning.'
 );
 
 console.log('TIMELINE TRACK MODEL OK');

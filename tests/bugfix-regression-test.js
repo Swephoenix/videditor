@@ -8,7 +8,6 @@ const {
   validateText,
   validateTransitionIn,
   validateCanvas,
-  parseNoiseFloor,
   textAnimationExpressions,
   buildAssSubtitle,
   waveformPeaksFromPcm,
@@ -18,6 +17,7 @@ const {
 const ROOT = path.resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
 const appJs = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
+const serverJs = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
 const timelineModelJs = fs.readFileSync(path.join(ROOT, 'timeline-model.js'), 'utf8');
 
 function response(body) {
@@ -75,6 +75,8 @@ function assert(condition, message) {
 }
 
 async function testServerContracts() {
+  assert(!html.includes('apply-noise-gate') && !html.includes('gate-threshold'), 'Noise Gate-kontroller finns kvar i gränssnittet.');
+  assert(!appJs.includes('/noise-gate') && !serverJs.includes("app.post('/api/media/:id/noise-gate'"), 'Noise Gate-kod eller API finns kvar.');
   const pcm = Buffer.alloc(16);
   pcm.writeFloatLE(0.2, 0);
   pcm.writeFloatLE(0.8, 4);
@@ -121,7 +123,6 @@ async function testServerContracts() {
   const expressions = textAnimationExpressions(text, 1, 5, 72);
   assert(expressions.x.includes('t-1.000'), 'Slide-animationen saknar tidsuttryck.');
   assert(expressions.alpha.includes('t-4.600'), 'Uttoningen saknar tidsuttryck.');
-  assert(parseNoiseFloor('mean_volume: -47.2 dB') === -47.2, 'Brusgolvet analyserades fel.');
   const transition = validateTransitionIn({ type: 'slide-left', duration: 0.6, cut: 4 }, 3.4, 8);
   assert(transition.type === 'slide-left' && transition.duration === 0.6, 'Servern validerade inte övergången.');
   const canvas = validateCanvas({ width: 1081, height: 1921 }, 1920, 1080);
@@ -229,6 +230,8 @@ async function testDelayedAutoSplitPersistence() {
   const input = window.document.querySelector('#media-input');
   input.files = [{ name: 'video.mp4' }];
   input.dispatchEvent(new window.Event('change'));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  window.document.querySelector('#confirm-track-placement')?.click();
   await new Promise((resolve) => setTimeout(resolve, 750));
   const persisted = JSON.parse(window.localStorage.getItem('videoeditor:editor'));
   assert(window.__test.state.clips.length === 2, 'Ljudsepareringen skapade inte två klipp.');
@@ -440,6 +443,11 @@ async function testTransitions() {
   window.__test.state.clips = clips;
   clips.forEach(window.__test.createClipElement);
   window.__test.selectClips(['in'], 'in');
+  assert(window.document.querySelector('#qt-transition').disabled, 'Övergångsknappen aktiverades med bara ett markerat klipp.');
+  assert(window.document.querySelector('#add-transition').disabled, 'Övergångsalternativet aktiverades med bara ett markerat klipp.');
+  window.__test.selectClips(['out', 'in'], 'in');
+  assert(!window.document.querySelector('#qt-transition').disabled, 'Övergångsknappen aktiverades inte med två markerade bildklipp.');
+  assert(!window.document.querySelector('#add-transition').disabled, 'Övergångsalternativet aktiverades inte med två markerade bildklipp.');
   window.__test.applyTransition('slide-left');
   const incoming = window.__test.state.clips.find((clip) => clip.id === 'in');
   assert(Math.abs(incoming.start - 3.4) < 0.001, 'Övergången skapade inget överlapp.');

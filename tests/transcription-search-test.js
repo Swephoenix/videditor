@@ -72,7 +72,7 @@ const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mill
 
 (async () => {
   window.eval(timelineModelJs);
-  window.eval(appJs);
+  window.eval(`${appJs}\nwindow.__transcriptionSearchTest = { state, renderTranscription, selectClip };`);
   await wait(30);
   const input = document.querySelector('#media-input');
   input.files = [{ name: 'tal.mp4' }];
@@ -94,6 +94,15 @@ const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mill
   document.querySelector('#start-transcribe').click();
   await wait(100);
 
+  const transcriptionState = window.__transcriptionSearchTest.state;
+  const sourceClip = transcriptionState.clips.find((clip) => clip.mediaId === 'audio-1');
+  sourceClip.trimEnd = 2;
+  window.__transcriptionSearchTest.renderTranscription();
+  window.__transcriptionSearchTest.selectClip(sourceClip.id);
+  if (!document.querySelector('#transcription-track').hidden || document.querySelector('.clip.transcription')) {
+    throw new Error('Transkriptionen finns fortfarande som material på tidslinjen.');
+  }
+
   const search = document.querySelector('#transcript-search-input');
   const resultsPanel = document.querySelector('#transcript-search-results');
   search.value = 'VÄRLDEN igen';
@@ -110,6 +119,32 @@ const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mill
     throw new Error(`Spelhuvudet hoppade inte till ordtiden: ${document.querySelector('#timecode').textContent}`);
   }
   if (!results[0].textContent.includes('Hej världen igen')) throw new Error('Träffen saknar textutdrag.');
+
+  search.value = 'värl';
+  search.dispatchEvent(new window.Event('input', { bubbles: true }));
+  const partialResults = [...document.querySelectorAll('.transcript-search-result')];
+  if (partialResults.length !== 2) {
+    throw new Error(`En del av ett ord hittade inte båda förekomsterna, fick ${partialResults.length}.`);
+  }
+  partialResults[0].click();
+  if (document.querySelector('#timecode').textContent !== '00:00.800') {
+    throw new Error(`En delordsträff hoppade inte till ordets tidsposition: ${document.querySelector('#timecode').textContent}`);
+  }
+
+  search.value = 'väntar';
+  search.dispatchEvent(new window.Event('input', { bubbles: true }));
+  const outsideResult = document.querySelector('.transcript-search-result');
+  if (!outsideResult || !outsideResult.classList.contains('outside-timeline')) {
+    throw new Error('Ett synligt ord utanför tidslinjen hittades inte och märktes inte som bortklippt.');
+  }
+  outsideResult.click();
+  if (document.querySelector('#timecode').textContent !== '00:00.800') {
+    throw new Error('En bortklippt sökträff flyttade playhead till en falsk tidslinjeposition.');
+  }
+  const highlightLines = document.querySelectorAll('.transcription-editor-highlight-line');
+  if (!highlightLines[1]?.classList.contains('active')) {
+    throw new Error('En bortklippt sökträff markerades inte i högerpanelens text.');
+  }
   search.dispatchEvent(new window.Event('blur', { bubbles: true }));
   console.log('Panel dold efter blur:', resultsPanel.hidden, '(expect true)');
   if (!resultsPanel.hidden) throw new Error('Sökträffspanelen ska döljas när sökfältet tappar fokus.');

@@ -40,11 +40,7 @@ const MAX_AUDIO_ANALYSES = 200;
 const MAX_AUDIO_TASKS = 2;
 const AUDIO_TASK_TIMEOUT_MS = 30 * 60 * 1000;
 const EXPORT_SAFETY_BYTES = 512 * 1024 * 1024;
-const CUDA_VIDEO_DECODERS = Object.freeze({
-  av1: 'av1_cuvid', h264: 'h264_cuvid', hevc: 'hevc_cuvid', mjpeg: 'mjpeg_cuvid',
-  mpeg1video: 'mpeg1_cuvid', mpeg2video: 'mpeg2_cuvid', mpeg4: 'mpeg4_cuvid',
-  vc1: 'vc1_cuvid', vp8: 'vp8_cuvid', vp9: 'vp9_cuvid'
-});
+const OUTPUT_DIRECTORY_TTL_MS = 12 * 60 * 60 * 1000;
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tif', '.tiff', '.svg']);
 const ALLOWED_EXTENSIONS = new Set([
   '.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v',
@@ -73,7 +69,9 @@ let mediaLibrary = loadLibrary();
 let audioAnalyses = loadAudioAnalyses();
 const jobs = new Map();
 const transcribeJobs = new Map();
+const outputDirectorySelections = new Map();
 let nvencCheck = null;
+let activeOutputDirectoryPicker = null;
 let librarySaveQueue = Promise.resolve();
 let audioAnalysisSaveQueue = Promise.resolve();
 let activeAudioTasks = 0;
@@ -82,6 +80,77 @@ function badRequest(message) {
   const error = new Error(message);
   error.status = 400;
   return error;
+}
+
+function runDirectoryPickerCommand(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    let spawnFailed = false;
+    child.stdout.on('data', (chunk) => { stdout = (stdout + chunk.toString()).slice(-8192); });
+    child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString()).slice(-2000); });
+    child.on('error', (error) => {
+      spawnFailed = true;
+      reject(error);
+    });
+    child.on('close', (code) => {
+      if (spawnFailed) return;
+      if (code === 0) return resolve(stdout.trim() || null);
+      if (code === 1) return resolve(null);
+      reject(new Error(`${command} kunde inte välja mapp (kod ${code}). ${stderr.trim()}`));
+    });
+  });
+}
+
+async function pickOutputDirectory() {
+  const pickers = [
+    ['zenity', ['--file-selection', '--directory', '--title=Välj output-mapp']],
+    ['kdialog', ['--getexistingdirectory', '.', '--title', 'Välj output-mapp']]
+  ];
+  for (const [command, args] of pickers) {
+    try {
+      return await runDirectoryPickerCommand(command, args);
+    } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      throw error;
+    }
+  }
+  const error = new Error('Ingen mappväljare hittades. Installera zenity eller kdialog.');
+  error.status = 501;
+  throw error;
+}
+
+function pruneOutputDirectorySelections(now = Date.now()) {
+  for (const [token, selection] of outputDirectorySelections) {
+    if (now - selection.createdAt > OUTPUT_DIRECTORY_TTL_MS) outputDirectorySelections.delete(token);
+  }
+}
+
+async function rememberOutputDirectory(directory) {
+  const resolved = await fsp.realpath(String(directory || ''));
+  const stats = await fsp.stat(resolved);
+  if (!stats.isDirectory()) throw badRequest('Den valda sökvägen är inte en mapp.');
+  await fsp.access(resolved, fs.constants.W_OK);
+  pruneOutputDirectorySelections();
+  const token = crypto.randomUUID();
+  outputDirectorySelections.set(token, { directory: resolved, createdAt: Date.now() });
+  return { token, directory: resolved };
+}
+
+async function resolveOutputDirectorySelection(token) {
+  pruneOutputDirectorySelections();
+  const selection = outputDirectorySelections.get(String(token || ''));
+  if (!selection) throw badRequest('Output-mappen har gått ut. Välj mappen igen.');
+  await fsp.access(selection.directory, fs.constants.W_OK);
+  return selection.directory;
+}
+
+function createExportFilename(format, id, now = new Date()) {
+  const safeFormat = ['mp4', 'mp3', 'wav'].includes(format) ? format : 'mp4';
+  const prefix = safeFormat === 'mp4' ? 'video' : 'ljud';
+  const timestamp = now.toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
+  return `${prefix}-${timestamp}-${String(id).slice(0, 8)}.${safeFormat}`;
 }
 
 function loadLibrary() {
@@ -168,10 +237,59 @@ function requireAudioMedia(id) {
     throw error;
   }
   if (!item.hasAudio) throw badRequest('Mediefilen saknar ljud.');
-  if (path.basename(item.storedName) !== item.storedName) throw badRequest('Mediefilens lagringsnamn är ogiltigt.');
+  const filePath = mediaFilePath(item);
+  return { item, filePath };
+}
+
+function mediaFilePath(item) {
+  if (item?.sourcePath) {
+    const filePath = path.resolve(String(item.sourcePath));
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) throw badRequest(`Mediefilen saknas: ${item.name}`);
+    return filePath;
+  }
+  if (!item?.storedName || path.basename(item.storedName) !== item.storedName) throw badRequest('Mediefilens lagringsnamn är ogiltigt.');
   const filePath = path.resolve(UPLOAD_DIR, item.storedName);
   if (path.dirname(filePath) !== path.resolve(UPLOAD_DIR)) throw badRequest('Mediefilens sökväg är ogiltig.');
-  return { item, filePath };
+  return filePath;
+}
+
+async function registerExternalMedia(filePath) {
+  const absolutePath = path.resolve(filePath);
+  const stat = await fsp.stat(absolutePath);
+  if (!stat.isFile()) throw badRequest('Den valda sökvägen är inte en fil.');
+  if (stat.size > MAX_UPLOAD_BYTES) throw badRequest('Filen är för stor.');
+  const extension = path.extname(absolutePath).toLowerCase();
+  if (!ALLOWED_EXTENSIONS.has(extension)) throw badRequest('Filtypen stöds inte.');
+  const metadata = await probeMedia(absolutePath, extension);
+  const item = {
+    id: crypto.randomUUID(),
+    name: path.basename(absolutePath).slice(0, 200),
+    sourcePath: absolutePath,
+    storedName: path.basename(absolutePath),
+    size: stat.size,
+    createdAt: new Date().toISOString(),
+    ...metadata
+  };
+  mediaLibrary.set(item.id, item);
+  await saveLibrary();
+  return item;
+}
+
+async function chooseExternalMediaFiles() {
+  const commands = [
+    ['zenity', ['--file-selection', '--multiple', '--separator=\n', '--title=Välj media']],
+    ['kdialog', ['--getopenfilename', '.', '* Mediafiler | *.mp4 *.mov *.mkv *.avi *.webm *.mp3 *.wav *.m4a *.jpg *.jpeg *.png *.webp *.svg']]
+  ];
+  let lastError = null;
+  for (const [command, args] of commands) {
+    try {
+      const result = await runProcess(command, args);
+      const files = String(result.stdout || '').split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+      if (files.length) return files;
+      return [];
+    } catch (error) { lastError = error; }
+  }
+  throw new Error(lastError?.message || 'Ingen lokal filväljare är installerad.');
 }
 
 function flattenTranscriptionWords(item) {
@@ -323,8 +441,8 @@ async function refreshLegacyVideoMetadata() {
   let changed = false;
   for (const [id, item] of mediaLibrary) {
     if (item.kind !== 'video' || (Number.isFinite(item.rotation) && Number.isFinite(item.frameRate))) continue;
-    const filePath = path.join(UPLOAD_DIR, item.storedName);
     try {
+      const filePath = mediaFilePath(item);
       const metadata = await probeMedia(filePath, path.extname(item.storedName).toLowerCase());
       mediaLibrary.set(id, { ...item, ...metadata });
       changed = true;
@@ -344,20 +462,9 @@ async function hasWorkingNvenc(force = false) {
   return nvencCheck;
 }
 
-function cudaDecoderForMedia(media) {
-  return CUDA_VIDEO_DECODERS[String(media?.videoCodec || '').toLowerCase()] || null;
-}
-
-function appendMediaInputArgs(args, clip, inputPath, requireCuda = true, frameRate = 30) {
+function appendMediaInputArgs(args, clip, inputPath, frameRate = 30) {
   const length = Math.max(0.001, Number(clip.trimEnd) - Number(clip.trimStart));
   if (clip.kind === 'image') args.push('-loop', '1', '-framerate', formatFrameRate(frameRate));
-  if (clip.kind === 'video' && requireCuda) {
-    const decoder = cudaDecoderForMedia(clip.media);
-    if (!decoder) {
-      throw new Error(`CUDA/NVDEC saknar stöd för videocodec "${clip.media?.videoCodec || 'okänd'}".`);
-    }
-    args.push('-c:v', decoder);
-  }
   if (clip.kind === 'video' || clip.kind === 'audio') {
     args.push('-ss', Number(clip.trimStart).toFixed(3), '-t', length.toFixed(3));
   }
@@ -406,6 +513,22 @@ app.get('/api/status', async (_request, response) => {
 });
 
 app.get('/api/media', (_request, response) => response.json([...mediaLibrary.values()]));
+
+app.post('/api/media/select', async (request, response, next) => {
+  const address = request.socket.remoteAddress || '';
+  const loopback = address === '::1' || address === '127.0.0.1' || address.startsWith('::ffff:127.');
+  if (!loopback) return response.status(403).json({ error: 'Filväljaren är endast tillgänglig lokalt.' });
+  try {
+    const files = await chooseExternalMediaFiles();
+    if (!files.length) return response.json({ cancelled: true, media: [] });
+    const media = [];
+    for (const file of files) media.push(await registerExternalMedia(file));
+    response.status(201).json({ cancelled: false, media });
+  } catch (error) {
+    if (!error.status) error.status = 400;
+    next(error);
+  }
+});
 
 app.post('/api/media', upload.single('media'), async (request, response, next) => {
   if (!request.file) return response.status(400).json({ error: 'Ingen fil skickades.' });
@@ -457,8 +580,16 @@ app.post('/api/media/html', async (request, response, next) => {
 app.get('/api/media/:id/file', (request, response) => {
   const item = mediaLibrary.get(request.params.id);
   if (!item) return response.status(404).json({ error: 'Mediefilen finns inte.' });
-  response.setHeader('Cache-Control', 'private, max-age=3600');
-  response.sendFile(path.join(UPLOAD_DIR, item.storedName));
+  try {
+    // Make byte-range streaming explicit so long media files are fetched in
+    // small seekable portions by the browser instead of being downloaded in
+    // full before preview playback can start.
+    response.setHeader('Accept-Ranges', 'bytes');
+    response.setHeader('Cache-Control', 'private, max-age=3600');
+    response.sendFile(mediaFilePath(item));
+  } catch (error) {
+    response.status(error.status || 404).json({ error: error.message });
+  }
 });
 
 app.get('/api/media/:id/waveform', async (request, response, next) => {
@@ -532,7 +663,7 @@ app.get('/api/media/:id/thumbs', async (request, response, next) => {
       return;
     }
     const startedAt = Date.now();
-    const filePath = path.join(UPLOAD_DIR, item.storedName);
+    const filePath = mediaFilePath(item);
     const interval = Math.max(0.1, (end - start) / count);
     const positions = [];
     for (let i = 0; i < count; i += 1) {
@@ -554,6 +685,52 @@ app.get('/api/media/:id/thumbs', async (request, response, next) => {
     response.setHeader('Cache-Control', 'private, max-age=86400');
     response.type('image/jpeg').send(buffer);
   } catch (error) {
+    if (!error.status) error.status = 400;
+    next(error);
+  }
+});
+
+app.post('/api/media/:id/still', async (request, response, next) => {
+  let outputPath = null;
+  let stillId = null;
+  try {
+    const item = mediaLibrary.get(request.params.id);
+    if (!item) return response.status(404).json({ error: 'Mediefilen finns inte.' });
+    if (!item.hasVideo || item.kind !== 'video') {
+      return response.status(400).json({ error: 'Stillbilder kan bara tas från videofiler.' });
+    }
+    const duration = Number(item.duration) || 0;
+    if (!(duration > 0)) throw badRequest('Videon saknar längd.');
+    const requestedTime = Number(request.body?.time);
+    if (!Number.isFinite(requestedTime)) throw badRequest('En giltig källtid krävs.');
+    const frameTime = clamp(requestedTime, 0, Math.max(0, duration - 0.001));
+    stillId = crypto.randomUUID();
+    const storedName = `${stillId}.png`;
+    outputPath = path.join(UPLOAD_DIR, storedName);
+    const sourcePath = mediaFilePath(item);
+    await withThumbTask(() => runProcess('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error', '-y',
+      '-ss', frameTime.toFixed(6), '-i', sourcePath,
+      '-map', '0:v:0', '-frames:v', '1', '-an', outputPath
+    ], { timeout: 30_000, killSignal: 'SIGKILL' }));
+    const metadata = await probeMedia(outputPath, '.png');
+    const timeLabel = frameTime.toFixed(3).replace('.', '-');
+    const stillItem = {
+      id: stillId,
+      name: `${item.name.replace(/\.[^.]+$/, '')}_still_${timeLabel}.png`.slice(0, 200),
+      storedName,
+      size: (await fsp.stat(outputPath)).size,
+      createdAt: new Date().toISOString(),
+      ...metadata,
+      capturedFrom: item.id,
+      capturedAt: frameTime
+    };
+    mediaLibrary.set(stillId, stillItem);
+    await saveLibrary();
+    response.status(201).json(stillItem);
+  } catch (error) {
+    if (stillId) mediaLibrary.delete(stillId);
+    if (outputPath) await fsp.unlink(outputPath).catch(() => {});
     if (!error.status) error.status = 400;
     next(error);
   }
@@ -609,7 +786,7 @@ app.post('/api/media/:id/extract-audio', async (request, response, next) => {
     const item = mediaLibrary.get(request.params.id);
     if (!item) return response.status(404).json({ error: 'Mediefilen finns inte.' });
     if (!item.hasAudio) return response.status(400).json({ error: 'Källan saknar ljud att extrahera.' });
-    const sourcePath = path.join(UPLOAD_DIR, item.storedName);
+    const sourcePath = mediaFilePath(item);
     const audioId = crypto.randomUUID();
     const canCopyWithoutLoss = item.audioCodec === 'aac';
     const extension = canCopyWithoutLoss ? '.m4a' : '.wav';
@@ -642,121 +819,6 @@ app.post('/api/media/:id/extract-audio', async (request, response, next) => {
       extractedFrom: item.id
     };
     mediaLibrary.set(audioId, audioItem);
-    await saveLibrary();
-    response.status(201).json(audioItem);
-  } catch (error) {
-    if (!error.status) error.status = 400;
-    next(error);
-  }
-});
-
-const noiseProfiles = new Map();
-
-app.post('/api/media/:id/noise-print', async (request, response, next) => {
-  try {
-    const item = mediaLibrary.get(request.params.id);
-    if (!item) return response.status(404).json({ error: 'Mediefilen finns inte.' });
-    if (!item.hasAudio) return response.status(400).json({ error: 'Filen har inget ljud.' });
-    const duration = item.duration || 0;
-    const startTime = Number(request.body?.startTime) || 0;
-    const endTime = Number(request.body?.endTime) || Math.min(startTime + 0.5, duration);
-    if (startTime < 0 || endTime > duration || endTime - startTime < 0.05) {
-      return response.status(400).json({ error: 'Ogiltigt tidsintervall.' });
-    }
-    const profileId = crypto.randomUUID();
-    const sampleName = `${profileId}.wav`;
-    const samplePath = path.join(UPLOAD_DIR, sampleName);
-    const sourcePath = path.join(UPLOAD_DIR, item.storedName);
-    await runProcess('ffmpeg', [
-      '-hide_banner', '-y', '-i', sourcePath,
-      '-ss', String(startTime), '-to', String(endTime),
-      '-ac', '1', '-ar', '16000', '-sample_fmt', 's16',
-      samplePath
-    ]);
-    const probe = await probeMedia(samplePath, '.wav').catch(() => null);
-    const volumeAnalysis = await runProcess('ffmpeg', [
-      '-hide_banner', '-i', samplePath, '-af', 'volumedetect', '-f', 'null', '-'
-    ]);
-    const noiseFloorDb = parseNoiseFloor(volumeAnalysis.stderr);
-    noiseProfiles.set(profileId, {
-      id: profileId, mediaId: item.id, samplePath, sampleDuration: probe?.duration || (endTime - startTime),
-      createdAt: new Date().toISOString(), startTime, endTime, noiseFloorDb
-    });
-    response.status(201).json({ id: profileId, sampleDuration: endTime - startTime, noiseFloorDb });
-  } catch (error) {
-    if (!error.status) error.status = 400;
-    next(error);
-  }
-});
-
-app.post('/api/media/:id/reduce-noise', async (request, response, next) => {
-  try {
-    const item = mediaLibrary.get(request.params.id);
-    if (!item) return response.status(404).json({ error: 'Mediefilen finns inte.' });
-    if (!item.hasAudio) return response.status(400).json({ error: 'Filen har inget ljud.' });
-    const amount = clamp(Number(request.body?.amount ?? 0.8), 0, 1);
-    const noiseProfileId = String(request.body?.noiseProfileId || '');
-    const noiseProfile = noiseProfiles.get(noiseProfileId);
-    if (!noiseProfileId || !noiseProfile) {
-      return response.status(400).json({ error: 'Inget brusprofil hittades. Fånga en brusprofil först.' });
-    }
-    if (noiseProfile.mediaId !== item.id) {
-      return response.status(400).json({ error: 'Brusprofilen tillhör ett annat ljudklipp.' });
-    }
-    const newId = crypto.randomUUID();
-    const storedName = `${newId}.m4a`;
-    const outputPath = path.join(UPLOAD_DIR, storedName);
-    const sourcePath = path.join(UPLOAD_DIR, item.storedName);
-    const noiseReductionDb = 0.01 + amount * 29.99;
-    const noiseFloorDb = clamp(noiseProfile.noiseFloorDb, -80, -20);
-    await runProcess('ffmpeg', [
-      '-hide_banner', '-y', '-i', sourcePath,
-      '-af', `afftdn=nf=${noiseFloorDb.toFixed(1)}:nr=${noiseReductionDb.toFixed(1)}:nt=w:gs=8`,
-      '-c:a', 'aac', '-b:a', '192k', outputPath
-    ]);
-    const probe = await probeMedia(outputPath, '.m4a').catch(() => null);
-    const audioItem = {
-      id: newId, name: `${item.name.replace(/\.[^.]+$/, '')}_denoist.m4a`,
-      storedName, size: (await fsp.stat(outputPath)).size,
-      createdAt: new Date().toISOString(), kind: 'audio', duration: probe?.duration || item.duration || 0,
-      hasVideo: false, hasAudio: true, width: 0, height: 0, rotation: 0, videoCodec: null, audioCodec: 'aac',
-      processedFrom: item.id, noiseProfileId
-    };
-    mediaLibrary.set(newId, audioItem);
-    await saveLibrary();
-    response.status(201).json(audioItem);
-  } catch (error) {
-    if (!error.status) error.status = 400;
-    next(error);
-  }
-});
-
-app.post('/api/media/:id/noise-gate', async (request, response, next) => {
-  try {
-    const item = mediaLibrary.get(request.params.id);
-    if (!item) return response.status(404).json({ error: 'Mediefilen finns inte.' });
-    if (!item.hasAudio) return response.status(400).json({ error: 'Filen har inget ljud.' });
-    const threshold = clamp(Number(request.body?.threshold ?? 0.05), 0.001, 1);
-    const attack = clamp(Number(request.body?.attack ?? 2), 0.1, 100);
-    const release = clamp(Number(request.body?.release ?? 10), 1, 500);
-    const newId = crypto.randomUUID();
-    const storedName = `${newId}.m4a`;
-    const outputPath = path.join(UPLOAD_DIR, storedName);
-    const sourcePath = path.join(UPLOAD_DIR, item.storedName);
-    await runProcess('ffmpeg', [
-      '-hide_banner', '-y', '-i', sourcePath,
-      '-af', `agate=threshold=${threshold.toFixed(4)}:attack=${attack.toFixed(2)}:release=${release.toFixed(2)}:makeup=1:ratio=10`,
-      '-c:a', 'aac', '-b:a', '192k', outputPath
-    ]);
-    const probe = await probeMedia(outputPath, '.m4a').catch(() => null);
-    const audioItem = {
-      id: newId, name: `${item.name.replace(/\.[^.]+$/, '')}_gate.m4a`,
-      storedName, size: (await fsp.stat(outputPath)).size,
-      createdAt: new Date().toISOString(), kind: 'audio', duration: probe?.duration || item.duration || 0,
-      hasVideo: false, hasAudio: true, width: 0, height: 0, rotation: 0, videoCodec: null, audioCodec: 'aac',
-      processedFrom: item.id
-    };
-    mediaLibrary.set(newId, audioItem);
     await saveLibrary();
     response.status(201).json(audioItem);
   } catch (error) {
@@ -1006,18 +1068,40 @@ app.post('/api/audio/master', async (request, response, next) => {
   }
 });
 
+app.post('/api/export/select-folder', async (_request, response, next) => {
+  try {
+    if (!activeOutputDirectoryPicker) {
+      activeOutputDirectoryPicker = pickOutputDirectory().finally(() => {
+        activeOutputDirectoryPicker = null;
+      });
+    }
+    const directory = await activeOutputDirectoryPicker;
+    if (!directory) return response.json({ cancelled: true });
+    const selection = await rememberOutputDirectory(directory);
+    response.json({ token: selection.token, path: selection.directory, name: path.basename(selection.directory) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/api/export', async (request, response, next) => {
   try {
     const project = validateProject(request.body);
-    const availableBytes = await availableExportBytes();
+    const outputDirectory = request.body.outputDirectoryToken
+      ? await resolveOutputDirectorySelection(request.body.outputDirectoryToken)
+      : EXPORT_DIR;
+    const availableBytes = await availableExportBytes(outputDirectory);
     const reservedBytes = [...jobs.values()]
       .filter((candidate) => ['queued', 'rendering', 'upscaling'].includes(candidate.status))
       .reduce((total, candidate) => total + (Number(candidate.reservedBytes) || 0), 0);
     const requiredBytes = ensureExportStorage(project, availableBytes, reservedBytes);
     const id = crypto.randomUUID();
+    const outputFileName = createExportFilename(project.format, id);
     const job = {
       id, format: project.format, status: 'queued', progress: 0,
-      createdAt: new Date().toISOString(), reservedBytes: requiredBytes
+      createdAt: new Date().toISOString(), reservedBytes: requiredBytes,
+      outputDirectory, outputFileName,
+      targetOutputPath: path.join(outputDirectory, outputFileName)
     };
     jobs.set(id, job);
     response.status(202).json(job);
@@ -1046,7 +1130,7 @@ app.get('/api/jobs/:id/download', (request, response) => {
     return response.status(404).json({ error: 'Exportfilen är inte klar.' });
   }
   const prefix = job.format === 'mp4' ? 'video' : 'ljud';
-  response.download(job.outputPath, `${prefix}-${job.id.slice(0, 8)}.${job.format}`);
+  response.download(job.outputPath, job.outputFileName || `${prefix}-${job.id.slice(0, 8)}.${job.format}`);
 });
 
 app.post('/api/jobs/:id/cancel', (request, response) => {
@@ -1061,8 +1145,8 @@ app.post('/api/jobs/:id/cancel', (request, response) => {
   if (pid) {
     try { process.kill(pid, 'SIGKILL'); } catch (_error) { /* redan död */ }
   }
-  const p = path.join(EXPORT_DIR, `${job.id}.${job.format || 'mp4'}`);
-  fsp.unlink(p).catch(() => {});
+  const activeOutputPath = job.activeOutputPath || path.join(EXPORT_DIR, `${job.id}.${job.format || 'mp4'}`);
+  fsp.unlink(activeOutputPath).catch(() => {});
   response.json({ status: 'cancelled' });
 });
 
@@ -1133,12 +1217,6 @@ function chooseProjectFrameRate(clips) {
   return selected?.frameRate ?? 30;
 }
 
-function parseNoiseFloor(stderr) {
-  const match = String(stderr || '').match(/mean_volume:\s*(-?(?:\d+(?:\.\d+)?|inf))\s*dB/i);
-  if (!match || match[1].toLowerCase() === '-inf') return -80;
-  return clamp(Number(match[1]), -80, -20);
-}
-
 function validateProject(body) {
   if (!body || !Array.isArray(body.clips) || body.clips.length === 0) throw badRequest('Tidslinjen är tom.');
   if (body.clips.length > MAX_CLIPS) throw badRequest(`Max ${MAX_CLIPS} klipp kan exporteras.`);
@@ -1188,12 +1266,13 @@ function validateProject(body) {
       ? validateTransitionIn(clip.transitionIn, start, start + trimEnd - trimStart)
       : null;
     const animIn = (kind === 'video' || kind === 'image') ? validateClipAnimation(clip.animIn) : null;
+    const animOut = (kind === 'video' || kind === 'image') ? validateClipAnimation(clip.animOut) : null;
     const posX = (kind === 'video' || kind === 'image') ? clamp(clip.posX ?? 0, -1, 1) : 0;
     const posY = (kind === 'video' || kind === 'image') ? clamp(clip.posY ?? 0, -1, 1) : 0;
     const circular = (kind === 'video' || kind === 'image') && clip.circular
       ? { size: clamp(Number(clip.circular.size) || 0.5, 0.1, 0.5) }
       : null;
-    return { media, kind, start, trimStart, trimEnd, crop, muted, trackIndex, transitionIn, visualScale, animIn, posX, posY, circular };
+    return { media, kind, start, trimStart, trimEnd, crop, muted, trackIndex, transitionIn, visualScale, animIn, animOut, posX, posY, circular };
   });
   const duration = Math.max(...clips.map((clip) => clip.start + clip.trimEnd - clip.trimStart));
   if (duration > MAX_DURATION) throw badRequest('Projektet är längre än fyra timmar.');
@@ -1264,8 +1343,8 @@ function ensureExportStorage(project, availableBytes, reservedBytes = 0) {
   return requiredBytes;
 }
 
-async function availableExportBytes() {
-  const stats = await fsp.statfs(EXPORT_DIR);
+async function availableExportBytes(directory = EXPORT_DIR) {
+  const stats = await fsp.statfs(directory);
   return Number(stats.bavail) * Number(stats.bsize);
 }
 
@@ -1815,7 +1894,7 @@ async function runTranscriptionJob(jobId, item, model, language) {
   const job = transcribeJobs.get(jobId);
   job.status = 'transcribing';
   job.message = 'Extraherar ljud och laddar modell…';
-  const inputPath = path.join(UPLOAD_DIR, item.storedName);
+  const inputPath = mediaFilePath(item);
   const outputJson = path.join(EXPORT_DIR, `${jobId}-transcription.json`);
   const args = [TRANSCRIBE_SCRIPT, inputPath, outputJson, model];
   if (language) args.push(language);
@@ -1911,12 +1990,13 @@ function trackFfmpegProgress(child, job, duration, outputPath) {
 
 async function renderAudioProject(jobId, project) {
   const job = jobs.get(jobId);
-  const outputPath = path.join(EXPORT_DIR, `${jobId}.${project.format}`);
+  const outputPath = job.targetOutputPath || path.join(EXPORT_DIR, `${jobId}.${project.format}`);
+  job.activeOutputPath = outputPath;
   const args = ['-hide_banner', '-y'];
   const audibleClips = project.clips.filter((clip) => clip.media?.hasAudio && !clip.muted);
   audibleClips.forEach((clip, inputIndex) => {
     clip.inputIndex = inputIndex;
-    args.push('-i', path.join(UPLOAD_DIR, clip.media.storedName));
+    args.push('-i', mediaFilePath(clip.media));
   });
 
   const filters = [];
@@ -2058,29 +2138,22 @@ async function renderProject(jobId, project) {
   const job = jobs.get(jobId);
   Object.assign(job, {
     status: 'rendering', phase: 'prepare', phaseStartedAt: new Date().toISOString(),
-    decoder: 'NVIDIA CUDA/NVDEC'
+    decoder: 'FFmpeg'
   });
   const useNvenc = await hasWorkingNvenc();
   if (!useNvenc) {
     Object.assign(job, { status: 'failed', error: 'NVENC är inte tillgängligt. Kontrollera NVIDIA-drivrutin och FFmpeg.' });
     return;
   }
-  const unsupportedVideo = project.clips.find((clip) => clip.kind === 'video' && !cudaDecoderForMedia(clip.media));
-  if (unsupportedVideo) {
-    Object.assign(job, {
-      status: 'failed',
-      error: `CUDA/NVDEC saknar stöd för videocodec "${unsupportedVideo.media?.videoCodec || 'okänd'}".`
-    });
-    return;
-  }
-
-  const outputPath = path.join(EXPORT_DIR, `${jobId}.mp4`);
+  const internalOutputPath = path.join(EXPORT_DIR, `${jobId}.mp4`);
+  const outputPath = project.upscale ? internalOutputPath : (job.targetOutputPath || internalOutputPath);
+  job.activeOutputPath = outputPath;
   const args = ['-hide_banner', '-y'];
   let inputIndex = 0;
   const svgClips = project.clips.filter((clip) => clip.media?.storedName?.toLowerCase().endsWith('.svg'));
   const tempPngs = [];
   await Promise.all(svgClips.map(async (clip) => {
-    const svgPath = path.join(UPLOAD_DIR, clip.media.storedName);
+    const svgPath = mediaFilePath(clip.media);
     const pngPath = await convertSvgToPng(svgPath, EXPORT_DIR);
     clip._svgPngPath = pngPath;
     tempPngs.push(pngPath);
@@ -2114,8 +2187,8 @@ async function renderProject(jobId, project) {
     if (clip.kind === 'blur' || clip.kind === 'text' || clip.kind === 'color' || clip.kind === 'html') return;
     clip.inputIndex = inputIndex;
     inputIndex += 1;
-    const inputPath = clip._svgPngPath || path.join(UPLOAD_DIR, clip.media.storedName);
-    appendMediaInputArgs(args, clip, inputPath, true, frameRate);
+    const inputPath = clip._svgPngPath || mediaFilePath(clip.media);
+    appendMediaInputArgs(args, clip, inputPath, frameRate);
   });
   for (const clip of project.clips) {
     if (clip.kind !== 'html') continue;
@@ -2157,12 +2230,23 @@ async function renderProject(jobId, project) {
           `d=${totalFrames}:s=${width}x${height}:fps=${fps},format=rgba,` +
           `setpts=PTS-STARTPTS+${clip.start.toFixed(3)}/TB,`;
       }
+      if (clip.animOut?.type === 'fade') {
+        const fadeDuration = Math.min(Number(clip.animOut.duration) || 0.5, length);
+        const fadeStart = clip.start + Math.max(0, length - fadeDuration);
+        animPost += `format=rgba,fade=t=out:st=${fadeStart.toFixed(3)}:` +
+          `d=${fadeDuration.toFixed(3)}:alpha=1,`;
+      }
       const baseLabel = clip.transitionIn?.type === 'dissolve' ? `vbase${index}` : `v${index}`;
+      // Segment copies can start at arbitrary source timestamps and may come
+      // from VFR media. Normalize the cadence after trimming so every copied
+      // section produces continuous, CFR frames instead of a held/frozen
+      // frame at the segment boundary.
+      const cadenceFilter = clip.kind === 'video' ? `fps=${fps},` : '';
       filters.push(
         `[${clip.inputIndex}:v]${trim},` +
         (clip.kind === 'image' ? 'format=rgba,' : '') +
         cropFilter +
-        `setpts=PTS-STARTPTS+${clip.start.toFixed(3)}/TB,` +
+        `setpts=PTS-STARTPTS,${cadenceFilter}setpts=PTS-STARTPTS+${clip.start.toFixed(3)}/TB,` +
         contentFilter +
         circleFilter +
         frameFilter +
@@ -2375,7 +2459,7 @@ async function renderProject(jobId, project) {
     '-c:a', 'aac', '-b:a', '192k', '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
     '-t', project.duration.toFixed(3), '-progress', 'pipe:1', '-nostats', outputPath
   );
-  const hwLabel = 'NVIDIA CUDA/NVDEC → NVENC';
+  const hwLabel = 'FFmpeg-avkodning → NVIDIA NVENC';
   const encoderLabel = lossless ? `${hwLabel} · lossless` : `${hwLabel} · ${qualityLabel} (CRF ${crf})`;
   job.encoder = encoderLabel;
   job.phase = 'seek-decode';
@@ -2423,7 +2507,8 @@ async function renderProject(jobId, project) {
 
   async function runUpscaleStep(jobId, project, renderedPath) {
     const job = jobs.get(jobId);
-    const upscaledPath = path.join(EXPORT_DIR, `${jobId}-upscaled.mp4`);
+    const upscaledPath = job.targetOutputPath || path.join(EXPORT_DIR, `${jobId}-upscaled.mp4`);
+    job.activeOutputPath = upscaledPath;
     Object.assign(job, {
       status: 'upscaling',
       phase: 'upscale',
@@ -2438,6 +2523,7 @@ async function renderProject(jobId, project) {
       Object.assign(job, { status: 'completed', progress: 100, outputPath: upscaledPath, reservedBytes: 0 });
     } catch (error) {
       if (job.aborted) return;
+      await fsp.unlink(upscaledPath).catch(() => {});
       Object.assign(job, { status: 'failed', error: error.message, reservedBytes: 0 });
     }
   }
@@ -2501,7 +2587,6 @@ module.exports = {
   validateText,
   parseFrameRate,
   chooseProjectFrameRate,
-  parseNoiseFloor,
   textAnimationExpressions,
   buildAssSubtitle,
   renderProject,
@@ -2514,10 +2599,12 @@ module.exports = {
   buildCircleMaskFilter,
   buildCircleMaskGraph,
   buildSubtitleAss,
-  cudaDecoderForMedia,
   appendMediaInputArgs,
   estimateExportStorageBytes,
   ensureExportStorage,
+  createExportFilename,
+  rememberOutputDirectory,
+  resolveOutputDirectorySelection,
   ffmpegFailureMessage,
   whisperPython,
   jobs

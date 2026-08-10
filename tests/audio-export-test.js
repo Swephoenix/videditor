@@ -7,6 +7,7 @@ const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
 const appJs = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
 const timelineModelJs = fs.readFileSync(path.join(ROOT, 'timeline-model.js'), 'utf8');
 const requests = [];
+let folderSelections = 0;
 
 const dom = new JSDOM(html, {
   runScripts: 'outside-only',
@@ -61,8 +62,15 @@ window.fetch = async (url, options = {}) => {
     requests.push(JSON.parse(options.body));
     return response({ id: `job-${requests.length}` }, 202);
   }
+  if (url === '/api/export/select-folder' && options.method === 'POST') {
+    folderSelections += 1;
+    return response({ token: 'folder-token', path: '/tmp/exports', name: 'exports' });
+  }
   if (/^\/api\/jobs\/job-\d+$/.test(url)) {
-    return response({ status: 'completed', progress: 100, encoder: 'test' });
+    return response({
+      status: 'completed', progress: 100, encoder: 'test',
+      outputDirectory: '/tmp/exports', outputFileName: 'ljud-test.wav'
+    });
   }
   return response({});
 };
@@ -81,18 +89,29 @@ function wait(milliseconds) {
   await wait(30);
 
   document.querySelector('#export-mp3').click();
+  await wait(10);
+  if (requests.length !== 0) throw new Error('Exporten startade innan användaren tryckte Exportera i modalrutan.');
+  if (!document.querySelector('#start-export').disabled) throw new Error('Exportknappen aktiverades utan output-mapp.');
+  document.querySelector('#choose-output-folder').click();
+  await wait(20);
+  document.querySelector('#start-export').click();
   await wait(30);
   document.querySelector('#export-wav').click();
+  await wait(10);
+  document.querySelector('#start-export').click();
   await wait(30);
 
   const formats = requests.map((request) => request.format);
   const audioSettingsAreSafe = requests.every((request) => request.hardware === 'cpu' && request.upscale === false);
-  const labelsAreUpdated = document.querySelector('#export-title').textContent === 'Exporterar WAV'
-    && document.querySelector('#download').textContent === 'Ladda ner WAV';
+  const folderTokensAreIncluded = requests.every((request) => request.outputDirectoryToken === 'folder-token');
+  const labelsAreUpdated = document.querySelector('#export-title').textContent === 'Exporterar WAV';
+  const obsoleteDownloadButtonIsGone = document.querySelector('#download') === null;
 
   if (formats.join(',') !== 'mp3,wav') throw new Error(`Fel exportformat: ${formats.join(',')}`);
   if (!audioSettingsAreSafe) throw new Error('Ljudexport försökte använda videoacceleration eller uppskalning.');
+  if (!folderTokensAreIncluded || folderSelections !== 1) throw new Error('Den valda output-mappen följde inte med exporterna.');
   if (!labelsAreUpdated) throw new Error('Exportdialogen visar inte valt ljudformat.');
+  if (!obsoleteDownloadButtonIsGone) throw new Error('Den gamla nedladdningsknappen finns kvar i exportdialogen.');
   console.log('AUDIO EXPORT OK');
 })().catch((error) => {
   console.error(error);

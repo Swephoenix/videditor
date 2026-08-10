@@ -77,6 +77,9 @@ async function saveAndImportCompleteProject() {
   state.playhead = 3.25;
   state.hiddenLayers = new Set([1]);
   state.flags = [{ id: 'flag-1', time: 2.5, note: 'Viktig bild' }];
+  state.projectName = 'Detaljrikt projekt';
+  state.projectMediaIds = new Set(['media-video', 'media-image']);
+  state.importLayer = 1;
   state.transcriptionMediaId = 'media-video';
   state.transcriptionSegments = [{ start: 1, end: 2, text: 'sparad transkribering' }];
   state.clips = [
@@ -109,6 +112,9 @@ async function saveAndImportCompleteProject() {
   assert(savedJson, 'Spara-knappen skapade ingen projektfil.');
   const saved = JSON.parse(savedJson);
   assert(saved.version >= 3, 'Projektfilen använder inte det kompletta, versionshanterade formatet.');
+  assert(saved.projectName === 'Detaljrikt projekt', 'Projektnamnet försvann vid spara.');
+  assert(saved.projectMediaIds.includes('media-image'), 'Projektets mediareferenser försvann vid spara.');
+  assert(saved.importLayer === 1, 'Importlagret försvann vid spara.');
   assert(saved.flags?.[0]?.note === 'Viktig bild', 'Flaggor försvann vid Spara.');
   assert(saved.clips.find((clip) => clip.kind === 'color')?.color?.color === '#123456', 'Färgblockets data försvann vid Spara.');
   assert(saved.clips.find((clip) => clip.kind === 'html')?.html?.code.includes('Bevara mig'), 'HTML-blockets kod försvann vid Spara.');
@@ -129,6 +135,9 @@ async function saveAndImportCompleteProject() {
   assert(state.exportWindow?.x === 0.1 && state.exportWindow?.height === 0.6, 'Import återskapade inte exportområdet.');
   assert(state.playhead === 3.25, 'Import återskapade inte tidspositionen.');
   assert(state.hiddenLayers.has(1), 'Import återskapade inte dolda lager.');
+  assert(state.projectName === 'Detaljrikt projekt', 'Import återskapade inte projektnamnet.');
+  assert(state.projectMediaIds.has('media-image'), 'Import återskapade inte projektets mediareferenser.');
+  assert(state.importLayer === 1, 'Import återskapade inte importlagret.');
   assert(state.clips.find((clip) => clip.kind === 'color')?.color?.color === '#123456', 'Import återskapade inte färgblocket.');
   assert(state.clips.find((clip) => clip.kind === 'html')?.html?.code.includes('Bevara mig'), 'Import återskapade inte HTML-blocket.');
   assert(state.clips.find((clip) => clip.kind === 'text')?.text?.text === 'Allt ska sparas', 'Import återskapade inte texten.');

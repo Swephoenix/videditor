@@ -38,3 +38,4 @@ audio-analyses.json
 emails.json
 *.log
 autosave.json
+.optimizer-report/

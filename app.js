@@ -5,6 +5,7 @@ if (!timelineModel) throw new Error('timeline-model.js måste laddas före app.j
 
 const DEFAULT_PX_PER_SECOND = 40;
 const MAX_PX_PER_SECOND = 320;
+const TIMELINE_FPS = 30;
 let timelinePixelsPerSecond = DEFAULT_PX_PER_SECOND;
 const waveformCache = new Map();
 const MIN_CLIP_SECONDS = 0.1;
@@ -14,16 +15,20 @@ const MARQUEE_DRAG_THRESHOLD = 4;
 const MARQUEE_SCROLL_EDGE = 72;
 const MARQUEE_MAX_SCROLL_SPEED = 24;
 const state = {
-  clips: [], selectedId: null, selectedIds: new Set(), playhead: 0, action: null, nvenc: false, canvas: null,
-  playing: false, playbackFrame: null, playbackOrigin: 0, playbackStartedAt: 0, blurDrag: null, textDrag: null,
-  currentJobId: null, currentTranscribeJobId: null, transcribingClipId: null, transcriptionMediaId: null, transcriptionSegments: [], transcriptionWords: [],
+  clips: [], mediaBin: [], projectName: '', savedProjectName: '', projectNameDirty: false, segmentLibrary: [], projectMediaIds: new Set(), selectedId: null, selectedIds: new Set(), playhead: 0, action: null, nvenc: false, canvas: null,
+  playing: false, playbackFrame: null, playbackOrigin: 0, playbackStartedAt: 0, playbackEnd: 0, blurDrag: null, textDrag: null,
+  currentJobId: null, pendingExportFormat: 'mp4', pendingExportSelection: null, outputDirectorySelection: null,
+  currentTranscribeJobId: null, transcribingClipId: null, transcriptionMediaId: null, transcriptionSegments: [], transcriptionWords: [],
   transcriptionIndex: new Map(), transcriptSearchResults: [], transcriptSearchCursor: -1,
+  selectedTranscriptionSegmentIndex: -1, selectedTranscriptionSourceClipId: null, transcriptionEditMode: false,
   visualTrackEls: [], audioTrackEls: [], visualLabelEls: [], audioLabelEls: [], cropActive: false, cropPreview: null,
   flags: [], selectedFlagId: null, editingFlagId: null,
-  noiseProfileId: null, noiseProfileMediaId: null, waveformData: null, waveformDecoding: false,
-  timelineAudioPlayers: new Map(), visualScaleDrag: null, visualMoveDrag: null,
+  timelineAudioPlayers: new Map(), mediaPreloaders: new Map(), lastMediaPreloadAt: 0, visualScaleDrag: null, visualMoveDrag: null,
   previewLayers: new Map(), hiddenLayers: new Set(), importLayer: 'auto', timelineActive: false,
-  exportWindow: null
+  exportWindow: null, segmentSelectionActive: false, segmentDraftStart: null,
+  segmentRange: null, segmentPointDrag: null
+  , segmentRangeDrag: false, segmentRangeDragMoved: false, segmentRangeDragStart: null, pendingSegmentImport: null,
+  pendingTrackPlacement: null
 };
 const editorHistory = {
   undo: [], redo: [], clipboard: null, restoring: false,
@@ -40,6 +45,29 @@ const elements = {
   playhead: document.querySelector('#playhead'),
   playheadFollow: document.querySelector('#playhead-follow'),
   snapGuide: document.querySelector('#snap-guide'),
+  ruler: document.querySelector('#ruler'),
+  segmentSelection: document.querySelector('#segment-selection'),
+  segmentSelectionFill: document.querySelector('#segment-selection-fill'),
+  segmentInPoint: document.querySelector('#segment-in-point'),
+  segmentOutPoint: document.querySelector('#segment-out-point'),
+  qtSegmentCopy: document.querySelector('#qt-segment-copy'),
+  segmentCopyPopover: document.querySelector('#segment-copy-popover'),
+  segmentCopyStatus: document.querySelector('#segment-copy-status'),
+  segmentName: document.querySelector('#segment-name'),
+  newSegmentButton: document.querySelector('#new-segment-button'),
+  newSegmentForm: document.querySelector('#new-segment-form'),
+  cancelSegment: document.querySelector('#cancel-segment'),
+  newSegmentMeta: document.querySelector('#new-segment-meta'),
+  segmentLibraryCount: document.querySelector('#segment-library-count'),
+  saveSegment: document.querySelector('#save-segment'),
+  segmentLibraryList: document.querySelector('#segment-library-list'),
+  copySegment: document.querySelector('#copy-segment'),
+  resetSegment: document.querySelector('#reset-segment'),
+  closeSegmentCopy: document.querySelector('#close-segment-copy'),
+  programClipboard: document.querySelector('#program-clipboard'),
+  programClipboardSummary: document.querySelector('#program-clipboard-summary'),
+  pasteProgramClipboard: document.querySelector('#paste-program-clipboard'),
+  clearProgramClipboard: document.querySelector('#clear-program-clipboard'),
   flagLane: document.querySelector('#flag-lane'),
   flagEditModal: document.querySelector('#flag-edit-modal'),
   flagEditTime: document.querySelector('#flag-edit-time'),
@@ -63,10 +91,22 @@ const elements = {
   transcriptionLabel: document.querySelector('#transcription-label'),
   audioTrack: document.querySelector('#audio-track'),
   mediaInput: document.querySelector('#media-input'),
+  mediaPoolInput: document.querySelector('#media-pool-input'),
+  mediaPool: document.querySelector('#media-pool'),
+  mediaPoolToggle: document.querySelector('#media-pool-toggle'),
+  importToMediaPool: document.querySelector('#import-to-media-pool'),
+  mediaPoolList: document.querySelector('#media-pool-list'),
+  mediaPoolCount: document.querySelector('#media-pool-count'),
+  mediaPoolStatus: document.querySelector('#media-pool-status'),
+  projectNameDisplay: document.querySelector('#project-name-display'),
+  projectNameEditor: document.querySelector('#project-name-editor'),
+  saveProjectName: document.querySelector('#save-project-name'),
   preview: document.querySelector('#preview'),
   imagePreview: document.querySelector('#image-preview'),
   timelineAudio: document.querySelector('#timeline-audio'),
   previewWindow: document.querySelector('.preview-window'),
+  previewMediaStatus: document.querySelector('#preview-media-status'),
+  previewPreloadStatus: document.querySelector('#preview-preload-status'),
   exportFrameLabel: document.querySelector('#export-frame-label'),
   exportFrameOutline: document.querySelector('#export-frame-outline'),
   canvasFormat: document.querySelector('#canvas-format'),
@@ -99,6 +139,9 @@ const elements = {
   togglePlay: document.querySelector('#toggle-play'),
   transport: document.querySelector('.transport-controls'),
   cropTools: document.querySelector('#crop-tools'),
+  imageSizeTools: document.querySelector('#image-size-tools'),
+  imageWidth: document.querySelector('#image-width'),
+  imageHeight: document.querySelector('#image-height'),
   resetCrop: document.querySelector('#reset-crop'),
   cropOverlay: document.querySelector('#crop-overlay'),
   cropMaskT: document.querySelector('#crop-mask-t'),
@@ -117,6 +160,7 @@ const elements = {
   colorTools: document.querySelector('#color-tools'),
   colorInputs: [...document.querySelectorAll('.color-input')],
   toolsPanel: document.querySelector('#tools-panel'),
+  toolsPanelResizer: document.querySelector('#tools-panel-resizer'),
   textTools: document.querySelector('#text-tools'),
   textPresetButtons: [...document.querySelectorAll('[data-text-preset]')],
   useNvidia: document.querySelector('#use-nvidia'),
@@ -124,13 +168,25 @@ const elements = {
   autoFitCanvas: document.querySelector('#auto-fit-canvas'),
   exportSubtitles: document.querySelector('#export-subtitles'),
   exportQuality: document.querySelector('#export-quality'),
+  exportSelection: document.querySelector('#export-selection'),
   burnTranscription: document.querySelector('#burn-transcription'),
+  quickTranscription: document.querySelector('#qt-transcription'),
+  quickStillFrame: document.querySelector('#qt-still-frame'),
   transcriptWords: document.querySelector('#transcript-words'),
   transcriptOverlay: document.querySelector('#transcript-overlay'),
+  transcriptionTools: document.querySelector('#transcription-tools'),
+  transcriptionToolsSummary: document.querySelector('#transcription-tools-summary'),
+  editTranscription: document.querySelector('#edit-transcription'),
+  transcriptionEditorAll: document.querySelector('#transcription-editor-all'),
+  transcriptionEditorHighlight: document.querySelector('#transcription-editor-highlight'),
+  transcriptionEditorHighlightLines: document.querySelector('#transcription-editor-highlight-lines'),
+  transcriptionEditorError: document.querySelector('#transcription-editor-error'),
+  saveAllTranscription: document.querySelector('#save-all-transcription'),
+  copyAllTranscription: document.querySelector('#copy-all-transcription'),
+  transcriptionCopyStatus: document.querySelector('#transcription-copy-status'),
   transcribe: document.querySelector('#transcribe'),
   clipContextMenu: document.querySelector('#clip-context-menu'),
   separateFromAudio: document.querySelector('#separate-from-audio'),
-  editTranscription: document.querySelector('#edit-transcription'),
   layerContextMenu: document.querySelector('#layer-context-menu'),
   layerContextTitle: document.querySelector('#layer-context-title'),
   layerForward: document.querySelector('#layer-forward'),
@@ -147,18 +203,22 @@ const elements = {
   transcribeMessage: document.querySelector('#transcribe-message'),
   cancelTranscribe: document.querySelector('#cancel-transcribe'),
   closeTranscribeModal: document.querySelector('#close-transcribe-modal'),
-  transcriptionEditModal: document.querySelector('#transcription-edit-modal'),
-  transcriptionEditTime: document.querySelector('#transcription-edit-time'),
-  transcriptionEditText: document.querySelector('#transcription-edit-text'),
-  saveTranscriptionEdit: document.querySelector('#save-transcription-edit'),
-  closeTranscriptionEdit: document.querySelector('#close-transcription-edit'),
   modal: document.querySelector('#export-modal'),
   exportTitle: document.querySelector('#export-title'),
+  exportSetup: document.querySelector('#export-setup'),
+  outputFolderPath: document.querySelector('#output-folder-path'),
+  chooseOutputFolder: document.querySelector('#choose-output-folder'),
+  startExport: document.querySelector('#start-export'),
   progress: document.querySelector('#export-progress'),
   exportMessage: document.querySelector('#export-message'),
-  download: document.querySelector('#download'),
   cancelExport: document.querySelector('#cancel-export'),
   closeModal: document.querySelector('#close-modal'),
+  trackPlacementModal: document.querySelector('#track-placement-modal'),
+  trackPlacementTitle: document.querySelector('#track-placement-title'),
+  trackPlacementSummary: document.querySelector('#track-placement-summary'),
+  trackPlacementSelect: document.querySelector('#track-placement-select'),
+  confirmTrackPlacement: document.querySelector('#confirm-track-placement'),
+  cancelTrackPlacement: document.querySelector('#cancel-track-placement'),
   historyToggle: document.querySelector('#history-toggle'),
   historyPanel: document.querySelector('#history-panel'),
   historyList: document.querySelector('#history-list'),
@@ -167,28 +227,110 @@ const elements = {
   logList: document.querySelector('#log-list'),
   logClear: document.querySelector('#log-clear'),
   projectInput: document.querySelector('#project-input'),
-  audioTools: document.querySelector('#audio-tools'),
-  audioWaveform: document.querySelector('#audio-waveform'),
-  waveformTime: document.querySelector('#waveform-time'),
-  noisePrintStart: document.querySelector('#noise-print-start'),
-  noisePrintLength: document.querySelector('#noise-print-length'),
-  captureNoisePrint: document.querySelector('#capture-noise-print'),
-  noisePrintStatus: document.querySelector('#noise-print-status'),
-  nrAmount: document.querySelector('#nr-amount'),
-  applyNoiseReduction: document.querySelector('#apply-noise-reduction'),
-  gateThreshold: document.querySelector('#gate-threshold'),
-  gateAttack: document.querySelector('#gate-attack'),
-  gateRelease: document.querySelector('#gate-release'),
-  applyNoiseGate: document.querySelector('#apply-noise-gate'),
   toggleTranscription: document.querySelector('#toggle-transcription'),
   transitionModal: document.querySelector('#transition-modal'),
   transitionHelp: document.querySelector('#transition-help'),
   transitionDuration: document.querySelector('#transition-duration'),
   transitionDurationValue: document.querySelector('#transition-duration-value'),
   removeTransition: document.querySelector('#remove-transition'),
+  addTransition: document.querySelector('#add-transition'),
+  quickTransition: document.querySelector('#qt-transition'),
   linkToggle: document.querySelector('#qt-link'),
   importLayer: document.querySelector('#import-layer')
 };
+
+const TOOLS_PANEL_WIDTH_KEY = 'videoeditor:tools-panel-width';
+const MEDIA_POOL_COLLAPSED_KEY = 'videoeditor:media-pool-collapsed';
+const TOOLS_PANEL_MIN_WIDTH = 300;
+const TOOLS_PANEL_MAX_WIDTH = 720;
+
+function clampToolsPanelWidth(width) {
+  const viewportLimit = Math.max(TOOLS_PANEL_MIN_WIDTH, window.innerWidth - 360);
+  return clamp(Number(width) || 0, TOOLS_PANEL_MIN_WIDTH, Math.min(TOOLS_PANEL_MAX_WIDTH, viewportLimit));
+}
+
+function setToolsPanelWidth(width, save = true) {
+  const normalized = Math.round(clampToolsPanelWidth(width));
+  document.documentElement.style.setProperty('--desktop-inspector-width', `${normalized}px`);
+  elements.toolsPanelResizer?.setAttribute('aria-valuenow', String(normalized));
+  if (save) {
+    try { localStorage.setItem(TOOLS_PANEL_WIDTH_KEY, String(normalized)); } catch (_error) { /* lagring valfri */ }
+  }
+  return normalized;
+}
+
+function loadToolsPanelWidth() {
+  let saved = null;
+  try { saved = localStorage.getItem(TOOLS_PANEL_WIDTH_KEY); } catch (_error) { /* lagring valfri */ }
+  const defaultWidth = elements.toolsPanel.getBoundingClientRect().width || 384;
+  setToolsPanelWidth(saved || defaultWidth, false);
+}
+
+function initializeToolsPanelResizer() {
+  const handle = elements.toolsPanelResizer;
+  if (!handle || !elements.toolsPanel) return;
+  loadToolsPanelWidth();
+  let drag = null;
+  handle.addEventListener('pointerdown', (event) => {
+    if (window.innerWidth <= 900 || elements.toolsPanel.hidden || event.button !== 0) return;
+    event.preventDefault();
+    drag = { pointerId: event.pointerId, startX: event.clientX, startWidth: elements.toolsPanel.getBoundingClientRect().width };
+    handle.setPointerCapture?.(event.pointerId);
+    document.body.classList.add('resizing-tools-panel');
+  });
+  handle.addEventListener('pointermove', (event) => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    event.preventDefault();
+    setToolsPanelWidth(drag.startWidth + drag.startX - event.clientX, false);
+  });
+  const stopDrag = (event) => {
+    if (!drag || (event.pointerId != null && event.pointerId !== drag.pointerId)) return;
+    drag = null;
+    document.body.classList.remove('resizing-tools-panel');
+    try { localStorage.setItem(TOOLS_PANEL_WIDTH_KEY, getComputedStyle(document.documentElement).getPropertyValue('--desktop-inspector-width').trim()); } catch (_error) { /* lagring valfri */ }
+  };
+  handle.addEventListener('pointerup', stopDrag);
+  handle.addEventListener('pointercancel', stopDrag);
+  handle.addEventListener('keydown', (event) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const current = elements.toolsPanel.getBoundingClientRect().width;
+    const next = event.key === 'ArrowLeft' ? current + 16
+      : event.key === 'ArrowRight' ? current - 16
+        : event.key === 'Home' ? TOOLS_PANEL_MIN_WIDTH : TOOLS_PANEL_MAX_WIDTH;
+    setToolsPanelWidth(next);
+  });
+  window.addEventListener('resize', () => {
+    if (window.innerWidth > 900) setToolsPanelWidth(elements.toolsPanel.getBoundingClientRect().width, false);
+  });
+}
+
+initializeToolsPanelResizer();
+
+function setMediaPoolCollapsed(collapsed, save = true) {
+  if (!elements.mediaPool || !elements.mediaPoolToggle) return;
+  elements.mediaPool.classList.toggle('collapsed', collapsed);
+  elements.mediaPoolToggle.setAttribute('aria-expanded', String(!collapsed));
+  elements.mediaPoolToggle.title = collapsed ? 'Visa mediehanteraren' : 'Dölj mediehanteraren';
+  elements.mediaPoolToggle.textContent = collapsed ? 'Medier' : 'Fäll ihop';
+  if (save) {
+    try { localStorage.setItem(MEDIA_POOL_COLLAPSED_KEY, String(collapsed)); } catch (_error) { /* lagring valfri */ }
+  }
+}
+
+function initializeMediaPool() {
+  let collapsed = true;
+  try {
+    const saved = localStorage.getItem(MEDIA_POOL_COLLAPSED_KEY);
+    if (saved != null) collapsed = saved !== 'false';
+  } catch (_error) { /* standardläget används */ }
+  setMediaPoolCollapsed(collapsed, false);
+  elements.mediaPoolToggle?.addEventListener('click', () => {
+    setMediaPoolCollapsed(!elements.mediaPool.classList.contains('collapsed'));
+  });
+}
+
+initializeMediaPool();
 
 const CANVAS_PRESETS = Object.freeze({
   '16:9': { width: 1920, height: 1080 },
@@ -198,7 +340,12 @@ const CANVAS_PRESETS = Object.freeze({
   '21:9': { width: 2560, height: 1080 }
 });
 
-document.querySelector('#import-files').addEventListener('click', () => elements.mediaInput.click());
+document.querySelector('#import-files').addEventListener('click', () => selectMediaFromDisk({ addToTimeline: true }));
+elements.importToMediaPool.addEventListener('click', () => selectMediaFromDisk({ addToTimeline: false }));
+elements.mediaPoolInput.addEventListener('change', () => {
+  for (const file of elements.mediaPoolInput.files || []) uploadMediaToLibrary(file);
+  elements.mediaPoolInput.value = '';
+});
 document.querySelector('#new-project').addEventListener('click', newProject);
 document.querySelector('#save-project').addEventListener('click', saveProject);
 document.querySelector('#load-project').addEventListener('click', () => elements.projectInput.click());
@@ -213,6 +360,11 @@ document.querySelector('#add-transition').addEventListener('click', openTransiti
 document.querySelector('#qt-transition').addEventListener('click', openTransitionPicker);
 elements.linkToggle.addEventListener('click', toggleSelectedLink);
 document.querySelector('#close-transition').addEventListener('click', closeTransitionPicker);
+elements.confirmTrackPlacement?.addEventListener('click', confirmTrackPlacement);
+elements.cancelTrackPlacement?.addEventListener('click', closeTrackPlacementModal);
+elements.trackPlacementModal?.addEventListener('click', (event) => {
+  if (event.target === elements.trackPlacementModal) closeTrackPlacementModal();
+});
 elements.canvasFormat.addEventListener('change', applyCanvasFormat);
 elements.canvasWidth.addEventListener('change', applyCustomCanvasSize);
 elements.canvasHeight.addEventListener('change', applyCustomCanvasSize);
@@ -317,6 +469,14 @@ document.addEventListener('pointerup', stopColorBlockResize);
 elements.cropHandles.forEach((handle) => handle.addEventListener('pointerdown', startCropDrag));
 elements.cropPan.addEventListener('pointerdown', startCropPan);
 elements.visualScaleHandles.forEach((handle) => handle.addEventListener('pointerdown', startVisualScaleDrag));
+for (const input of [elements.imageWidth, elements.imageHeight]) {
+  input.addEventListener('change', () => setSelectedImageSize(input === elements.imageWidth ? 'width' : 'height', input.value));
+  input.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    input.blur();
+  });
+}
 document.addEventListener('pointermove', moveVisualScaleDrag);
 document.addEventListener('pointerup', stopVisualScaleDrag);
 elements.preview.addEventListener('pointerdown', startVisualMoveDrag);
@@ -346,9 +506,9 @@ function syncExportSubtitlesPrefill() {
   }
 }
 
-function exportSubtitleCues() {
+function exportSubtitleCues(clips = state.clips) {
   if (!elements.exportSubtitles?.checked || !state.transcriptionSegments.length || !state.transcriptionMediaId) return null;
-  const clip = state.clips.find(
+  const clip = clips.find(
     (item) => (item.kind === 'video' || item.kind === 'audio') && item.mediaId === state.transcriptionMediaId
   );
   if (!clip) return null;
@@ -391,22 +551,100 @@ document.addEventListener('drop', (e) => {
     uploadMedia(file);
   }
 });
-elements.burnTranscription.addEventListener('change', () => {
-  elements.toggleTranscription.classList.toggle('active', elements.burnTranscription.checked);
-  renderTranscriptOverlay(state.playhead);
-});
-elements.toggleTranscription.addEventListener('click', () => {
+function syncTranscriptionToggleButtons() {
+  const active = elements.burnTranscription.checked;
+  for (const button of [elements.toggleTranscription, elements.quickTranscription]) {
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  }
+}
+
+function toggleTranscriptionOverlay() {
   elements.burnTranscription.checked = !elements.burnTranscription.checked;
-  elements.toggleTranscription.classList.toggle('active', elements.burnTranscription.checked);
+  syncTranscriptionToggleButtons();
+  renderTranscriptOverlay(state.playhead);
+}
+
+elements.burnTranscription.addEventListener('change', () => {
+  syncTranscriptionToggleButtons();
   renderTranscriptOverlay(state.playhead);
 });
+elements.toggleTranscription.addEventListener('click', toggleTranscriptionOverlay);
+elements.quickTranscription.addEventListener('click', toggleTranscriptionOverlay);
+elements.quickStillFrame.addEventListener('click', captureStillFrame);
+syncTranscriptionToggleButtons();
 elements.transcriptWords.addEventListener('input', () => renderTranscriptOverlay(state.playhead));
+elements.copyAllTranscription.addEventListener('click', copyAllTranscription);
+elements.saveAllTranscription.addEventListener('click', saveAllTranscription);
+elements.editTranscription.addEventListener('click', () => setTranscriptionEditMode(!state.transcriptionEditMode));
+elements.transcriptionEditorAll.addEventListener('input', () => {
+  // Programmatic input (for example project integrations) can still enter edit mode;
+  // normal users reach this state through the explicit Redigera button because a
+  // readonly textarea cannot receive keyboard input.
+  if (elements.transcriptionEditorAll.readOnly) {
+    state.transcriptionEditMode = true;
+    elements.transcriptionEditorAll.readOnly = false;
+    elements.editTranscription.textContent = 'Klar';
+    elements.saveAllTranscription.disabled = false;
+  }
+  syncTranscriptionHighlightLines();
+  updateTranscriptSearch();
+});
+elements.transcriptionEditorAll.addEventListener('scroll', syncTranscriptionHighlightScroll);
+elements.transcriptionEditorAll.addEventListener('click', jumpToTranscriptionEditorLine);
 document.querySelector('#split').addEventListener('click', splitSelectedClip);
 elements.remove.addEventListener('click', removeSelectedClip);
 document.querySelector('#qt-blur').addEventListener('click', addBlurClip);
 document.querySelector('#qt-text').addEventListener('click', addTextClip);
 document.querySelector('#qt-html').addEventListener('click', addHtmlClip);
 document.querySelector('#qt-split').addEventListener('click', splitSelectedClip);
+elements.qtSegmentCopy.addEventListener('click', openSegmentCopyTool);
+elements.copySegment.addEventListener('click', copyMarkedSegment);
+elements.saveSegment.addEventListener('click', saveNamedSegment);
+elements.segmentName.addEventListener('input', () => renderSegmentSelection());
+elements.newSegmentButton.addEventListener('click', () => {
+  if (!state.segmentSelectionActive || !state.segmentRange) {
+    state.segmentSelectionActive = true;
+    state.segmentDraftStart = null;
+    state.segmentRange = null;
+    elements.segmentCopyStatus.textContent = 'Dra över tidslinjen för att markera IN och UT.';
+    elements.newSegmentButton.textContent = '＋ Nytt segment';
+    renderSegmentSelection();
+    return;
+  }
+  if (!clipsInSegmentRange().length) return;
+  const open = elements.newSegmentForm.hidden;
+  elements.newSegmentForm.hidden = !open;
+  elements.newSegmentButton.setAttribute('aria-expanded', String(open));
+  if (open) elements.segmentName.focus();
+});
+elements.cancelSegment.addEventListener('click', () => {
+  elements.newSegmentForm.hidden = true;
+  elements.newSegmentButton.setAttribute('aria-expanded', 'false');
+  elements.segmentName.value = '';
+  renderSegmentSelection();
+});
+elements.segmentName.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') { event.preventDefault(); saveNamedSegment(); }
+});
+elements.resetSegment.addEventListener('click', resetSegmentSelection);
+elements.closeSegmentCopy.addEventListener('click', closeSegmentCopyTool);
+elements.pasteProgramClipboard.addEventListener('click', pasteClipboard);
+elements.clearProgramClipboard.addEventListener('click', clearProgramClipboard);
+elements.ruler.addEventListener('mousedown', startSegmentRangeDrag);
+elements.ruler.addEventListener('mousemove', moveSegmentRangeDrag);
+document.addEventListener('mousemove', moveSegmentRangeDrag);
+document.addEventListener('mouseup', finishSegmentRangeDrag);
+elements.timeline.addEventListener('mousedown', startSegmentRangeDrag);
+elements.timeline.addEventListener('mousemove', moveSegmentRangeDrag);
+elements.ruler.addEventListener('click', (event) => {
+  if (state.segmentRangeDragMoved) return;
+  setSegmentPointFromRuler(event);
+});
+elements.segmentInPoint.addEventListener('mousedown', (event) => startSegmentPointDrag('start', event));
+elements.segmentOutPoint.addEventListener('mousedown', (event) => startSegmentPointDrag('end', event));
+document.addEventListener('mousemove', moveSegmentPointDrag);
+document.addEventListener('mouseup', stopSegmentPointDrag);
 document.querySelector('#qt-remove').addEventListener('click', removeSelectedClip);
 document.querySelector('#qt-crop').addEventListener('click', toggleCropMode);
 elements.cropDone.addEventListener('click', () => {
@@ -423,9 +661,10 @@ elements.cropDone.addEventListener('click', () => {
   updateAutoFitLabel();
 });
 elements.cropCancel.addEventListener('click', cancelCrop);
-document.querySelector('#export').addEventListener('click', () => exportProject('mp4'));
-document.querySelector('#export-mp3').addEventListener('click', () => exportProject('mp3'));
-document.querySelector('#export-wav').addEventListener('click', () => exportProject('wav'));
+document.querySelector('#export').addEventListener('click', () => openExportModal('mp4'));
+elements.exportSelection.addEventListener('click', () => openExportModal('mp4', 'selection'));
+document.querySelector('#export-mp3').addEventListener('click', () => openExportModal('mp3'));
+document.querySelector('#export-wav').addEventListener('click', () => openExportModal('wav'));
 document.querySelector('#export-quality').addEventListener('input', () => {
   const v = Number(elements.exportQuality.value);
   const labels = ['', '1 – låg', '2', '3 – standard', '4', '5 – lossless'];
@@ -439,77 +678,6 @@ elements.transcribe.addEventListener('click', () => {
 elements.separateFromAudio.addEventListener('click', () => {
   hideClipContextMenu();
   separateAudioFromVideo();
-});
-elements.captureNoisePrint.addEventListener('click', captureNoisePrint);
-elements.applyNoiseReduction.addEventListener('click', applyNoiseReduction);
-elements.applyNoiseGate.addEventListener('click', applyNoiseGate);
-[elements.nrAmount, elements.gateThreshold, elements.gateAttack, elements.gateRelease].forEach((slider) => {
-  slider.addEventListener('input', () => {
-    if (slider === elements.nrAmount) document.querySelector('#nr-amount-value').textContent = slider.value;
-    else if (slider === elements.gateThreshold) document.querySelector('#gate-threshold-value').textContent = slider.value;
-    else if (slider === elements.gateAttack) document.querySelector('#gate-attack-value').textContent = slider.value;
-    else if (slider === elements.gateRelease) document.querySelector('#gate-release-value').textContent = slider.value;
-  });
-});
-[elements.noisePrintStart, elements.noisePrintLength].forEach((input) => {
-  input.addEventListener('input', () => {
-    const clip = state.clips.find((item) => item.id === state.selectedId);
-    if (clip) renderWaveform(clip);
-  });
-});
-let waveformSelectionDrag = null;
-
-elements.audioWaveform.addEventListener('pointerdown', (event) => {
-  const clip = state.clips.find((item) => item.id === state.selectedId);
-  if (!clip || clip.kind !== 'audio') return;
-  const rect = elements.audioWaveform.getBoundingClientRect();
-  const frac = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
-  const duration = clipDuration(clip);
-  const clickTime = frac * duration;
-  waveformSelectionDrag = {
-    startOffset: clickTime,
-    currentOffset: clickTime,
-    savedStart: Number(elements.noisePrintStart.value) || 0,
-    savedLength: Number(elements.noisePrintLength.value) || 0.3
-  };
-  elements.audioWaveform.setPointerCapture(event.pointerId);
-  elements.noisePrintStart.value = clickTime.toFixed(1);
-  elements.noisePrintLength.value = Math.max(0.05, 0.05).toFixed(1);
-  renderWaveform(clip);
-});
-
-elements.audioWaveform.addEventListener('pointermove', (event) => {
-  if (!waveformSelectionDrag) return;
-  const clip = state.clips.find((item) => item.id === state.selectedId);
-  if (!clip) return;
-  const rect = elements.audioWaveform.getBoundingClientRect();
-  const frac = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
-  const duration = clipDuration(clip);
-  const currentTime = frac * duration;
-  waveformSelectionDrag.currentOffset = currentTime;
-  const start = Math.min(waveformSelectionDrag.startOffset, currentTime);
-  const end = Math.max(waveformSelectionDrag.startOffset, currentTime);
-  elements.noisePrintStart.value = start.toFixed(1);
-  elements.noisePrintLength.value = Math.max(0.05, (end - start)).toFixed(1);
-  renderWaveform(clip);
-});
-
-elements.audioWaveform.addEventListener('pointerup', (event) => {
-  if (!waveformSelectionDrag) return;
-  const wasDrag = Math.abs(waveformSelectionDrag.currentOffset - waveformSelectionDrag.startOffset) >= 0.05;
-  const drag = waveformSelectionDrag;
-  waveformSelectionDrag = null;
-  if (!wasDrag) {
-    elements.noisePrintStart.value = drag.savedStart.toFixed(1);
-    elements.noisePrintLength.value = drag.savedLength.toFixed(1);
-    const clip = state.clips.find((item) => item.id === state.selectedId);
-    if (clip) {
-      const rect = elements.audioWaveform.getBoundingClientRect();
-      const frac = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
-      const t = clip.start + frac * clipDuration(clip);
-      setPlayhead(clamp(t, 0, projectEnd()));
-    }
-  }
 });
 elements.transcriptSearchInput.addEventListener('input', updateTranscriptSearch);
 elements.transcriptSearchInput.addEventListener('focus', () => {
@@ -616,30 +784,7 @@ setupMenus();
 function hideClipContextMenu() {
   elements.clipContextMenu.hidden = true;
 }
-let contextMenuSegmentIndex = -1;
 elements.timeline.addEventListener('contextmenu', (event) => {
-  const transcriptionElement = event.target.closest('.clip.transcription[data-segment-index]');
-  if (transcriptionElement) {
-    const segmentIndex = Number(transcriptionElement.dataset.segmentIndex);
-    const segment = state.transcriptionSegments[segmentIndex];
-    if (!segment) {
-      hideClipContextMenu();
-      return;
-    }
-    event.preventDefault();
-    if (state.playing) stopPlayback();
-    contextMenuSegmentIndex = segmentIndex;
-    elements.transcribe.hidden = true;
-    elements.separateFromAudio.hidden = true;
-    elements.editTranscription.hidden = false;
-    elements.clipContextMenu.hidden = false;
-    const menuWidth = elements.clipContextMenu.offsetWidth || 180;
-    const menuHeight = elements.clipContextMenu.offsetHeight || 48;
-    elements.clipContextMenu.style.left = `${Math.max(4, Math.min(event.clientX, window.innerWidth - menuWidth - 4))}px`;
-    elements.clipContextMenu.style.top = `${Math.max(4, Math.min(event.clientY, window.innerHeight - menuHeight - 4))}px`;
-    elements.editTranscription.focus();
-    return;
-  }
   const clipElement = event.target.closest('.clip[data-id]');
   if (!clipElement) {
     hideClipContextMenu();
@@ -659,7 +804,6 @@ elements.timeline.addEventListener('contextmenu', (event) => {
   elements.separateFromAudio.hidden = isAudio;
   elements.transcribe.disabled = !isAudio;
   elements.transcribe.title = isAudio ? '' : 'Högerklicka på ett ljudklipp för att transkribera.';
-  elements.editTranscription.hidden = true;
   elements.clipContextMenu.hidden = false;
   const menuWidth = elements.clipContextMenu.offsetWidth || 180;
   const menuHeight = elements.clipContextMenu.offsetHeight || 48;
@@ -763,16 +907,9 @@ document.querySelector('#close-transcribe-modal').addEventListener('click', () =
   if (clip) setClipTranscribeProgress(clip.id, null);
   state.transcribingClipId = null;
 });
-elements.editTranscription.addEventListener('click', () => {
-  hideClipContextMenu();
-  if (contextMenuSegmentIndex >= 0 && state.transcriptionSegments[contextMenuSegmentIndex]) {
-    openTranscriptionEditor(contextMenuSegmentIndex);
-  }
-  contextMenuSegmentIndex = -1;
-});
-document.querySelector('#save-transcription-edit').addEventListener('click', saveTranscriptionEdit);
-document.querySelector('#close-transcription-edit').addEventListener('click', closeTranscriptionEditor);
 document.querySelector('#cancel-export').addEventListener('click', cancelExport);
+elements.chooseOutputFolder.addEventListener('click', chooseOutputFolder);
+elements.startExport.addEventListener('click', () => exportProject(state.pendingExportFormat));
 document.querySelector('#close-modal').addEventListener('click', () => {
   state.currentJobId = null;
   elements.modal.hidden = true;
@@ -843,6 +980,19 @@ function formatTime(seconds) {
   return `${String(minutes).padStart(2, '0')}:${remainder.toFixed(3).padStart(6, '0')}`;
 }
 
+function formatTimelineTimecode(seconds, fps = TIMELINE_FPS) {
+  const totalFrames = Math.max(0, Math.round((Number(seconds) || 0) * fps));
+  const frames = totalFrames % fps;
+  const totalSeconds = Math.floor(totalFrames / fps);
+  const wholeSeconds = totalSeconds % 60;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const minutes = totalMinutes % 60;
+  const hours = Math.floor(totalMinutes / 60);
+  return [hours, minutes, wholeSeconds, frames]
+    .map((value) => String(value).padStart(2, '0'))
+    .join(':');
+}
+
 function cloneValue(value) {
   return structuredClone(value);
 }
@@ -860,6 +1010,52 @@ function setClipWaveformLoading(clipId, loading) {
   } else {
     if (bar) bar.remove();
   }
+}
+
+function setClipLoadingState(clipId, channel, loading, error = false) {
+  const element = document.querySelector(`.clip[data-id="${CSS.escape(clipId)}"]`);
+  if (!element) return;
+  const key = `loading${String(channel || 'media').replace(/^[a-z]/, (letter) => letter.toUpperCase())}`;
+  if (loading) element.dataset[key] = error ? 'error' : '1';
+  else delete element.dataset[key];
+  const states = Object.keys(element.dataset)
+    .filter((name) => name.startsWith('loading'))
+    .map((name) => element.dataset[name]);
+  const failed = states.includes('error');
+  const active = states.some((state) => state === '1' || state === 'error');
+  let label = element.querySelector('.clip-loading-label');
+  if (!active) {
+    label?.remove();
+    return;
+  }
+  if (!label) {
+    label = document.createElement('span');
+    label.className = 'clip-loading-label';
+    label.setAttribute('aria-live', 'polite');
+    element.appendChild(label);
+  }
+  label.textContent = failed ? 'Fel' : 'Laddar';
+  label.classList.toggle('is-error', failed);
+  updateVisibleClipLoadingLabels();
+}
+
+function updateVisibleClipLoadingLabels() {
+  const viewport = elements.scroll?.getBoundingClientRect();
+  if (!viewport) return;
+  document.querySelectorAll('.clip-loading-label').forEach((label) => {
+    const clip = label.closest('.clip');
+    if (!clip) return;
+    const rect = clip.getBoundingClientRect();
+    const visibleLeft = Math.max(rect.left, viewport.left);
+    const visibleRight = Math.min(rect.right, viewport.right);
+    const visibleTop = Math.max(rect.top, viewport.top);
+    const visibleBottom = Math.min(rect.bottom, viewport.bottom);
+    const visible = visibleRight > visibleLeft && visibleBottom > visibleTop;
+    label.hidden = !visible;
+    if (!visible || rect.width <= 0) return;
+    const centerX = ((visibleLeft + visibleRight) / 2) - rect.left;
+    label.style.left = `${Math.max(12, Math.min(rect.width - 12, centerX))}px`;
+  });
 }
 
 function setClipTranscribeProgress(clipId, progress) {
@@ -881,8 +1077,32 @@ function setClipTranscribeProgress(clipId, progress) {
   bar.querySelector('.fill').style.width = `${Math.min(100, Math.max(0, progress))}%`;
 }
 
+function clipNearTimelineViewport(element, margin = 320) {
+  if (!element || !elements.scroll) return true;
+  const viewport = elements.scroll.getBoundingClientRect();
+  const rect = element.getBoundingClientRect();
+  if (!viewport.width) return true;
+  return rect.right >= viewport.left - margin && rect.left <= viewport.right + margin;
+}
+
+function renderVisibleTimelinePreviews() {
+  document.querySelectorAll('.clip.video').forEach((element) => {
+    if (!clipNearTimelineViewport(element)) return;
+    const clip = state.clips.find((item) => item.id === element.dataset.id);
+    const canvas = element.querySelector('.clip-thumbs');
+    if (clip && canvas?.dataset.thumbnailDeferred === '1') renderClip(clip);
+  });
+}
+
 function editorSnapshot() {
   return {
+    projectName: state.projectName,
+    segmentLibrary: cloneValue(state.segmentLibrary),
+    projectMediaIds: [...state.projectMediaIds],
+    mediaSources: state.mediaBin
+      .filter((media) => state.projectMediaIds.has(media.id) && typeof media.sourcePath === 'string' && media.sourcePath)
+      .map((media) => ({ id: media.id, name: media.name, sourcePath: media.sourcePath })),
+    importLayer: state.importLayer,
     clips: cloneValue(state.clips), selectedId: state.selectedId,
     playhead: state.playhead, canvas: state.canvas ? { ...state.canvas } : null,
     transcriptionMediaId: state.transcriptionMediaId,
@@ -1069,6 +1289,23 @@ function restoreEditor(snapshot) {
   stopTimelineAudioPlayers(true);
   editorHistory.restoring = true;
   state.action = null;
+  state.projectName = typeof snapshot.projectName === 'string' ? snapshot.projectName : '';
+  state.savedProjectName = state.projectName;
+  state.projectNameDirty = false;
+  state.transcriptionEditMode = false;
+  state.projectMediaIds = new Set(Array.isArray(snapshot.projectMediaIds) ? snapshot.projectMediaIds : []);
+  state.segmentLibrary = Array.isArray(snapshot.segmentLibrary) ? cloneValue(snapshot.segmentLibrary) : [];
+  state.importLayer = snapshot.importLayer === 'auto' || snapshot.importLayer == null
+    ? 'auto'
+    : Math.max(0, Math.floor(Number(snapshot.importLayer) || 0));
+  state.segmentSelectionActive = false;
+  state.segmentDraftStart = null;
+  state.segmentRange = null;
+  state.segmentPointDrag = null;
+  state.pendingSegmentImport = null;
+  state.pendingTrackPlacement = null;
+  if (elements.trackPlacementModal) elements.trackPlacementModal.hidden = true;
+  elements.segmentCopyPopover.hidden = true;
   state.blurDrag = null;
   state.cropActive = false;
   elements.cropTools.hidden = true;
@@ -1101,6 +1338,9 @@ function restoreEditor(snapshot) {
   updateTimelineWidth();
   updatePreviewWindowSize();
   syncCanvasControls();
+  renderSegmentSelection();
+  renderSegmentLibrary();
+  renderProjectName();
   editorHistory.restoring = false;
 }
 
@@ -1155,6 +1395,7 @@ async function api(url, options) {
 
 async function initialize() {
   buildRuler();
+  renderProgramClipboard();
   state.visualTrackEls = [elements.visualTrack];
   state.visualLabelEls = [document.querySelector('#visual-label')];
   state.audioTrackEls = [elements.audioTrack];
@@ -1171,6 +1412,7 @@ async function initialize() {
     }
   } catch (_error) { /* lagring valfri */ }
   syncCanvasControls();
+  await loadMediaLibrary();
   loadHistory();
   if (editorHistory.undo.length === 0) recordHistory();
   requestAnimationFrame(updatePreviewWindowSize);
@@ -1202,13 +1444,13 @@ async function initialize() {
 function buildRuler(duration = MIN_TIMELINE_SECONDS) {
   const ruler = document.querySelector('#ruler');
   const fragment = document.createDocumentFragment();
-  const labelSpacing = 36;
+  const labelSpacing = 92;
   const steps = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600];
   const step = steps.find((candidate) => candidate * timelinePixelsPerSecond >= labelSpacing) || steps[steps.length - 1];
   for (let second = 0; second <= duration; second += step) {
     const label = document.createElement('span');
     label.style.left = `${secondsToPixels(second)}px`;
-    label.textContent = `${second}s`;
+    label.textContent = formatTimelineTimecode(second);
     fragment.appendChild(label);
   }
   ruler.replaceChildren(fragment);
@@ -1250,6 +1492,7 @@ function enforceMinTimelineZoom() {
   renderAllClips();
   renderTranscription();
   elements.playhead.style.left = `${secondsToPixels(state.playhead)}px`;
+  renderSegmentSelection();
 }
 
 function updatePlayheadFollowIndicator() {
@@ -1320,6 +1563,7 @@ function updateTimelineZoom(nextScale, clientX) {
   renderAllClips();
   renderTranscription();
   renderFlags();
+  renderSegmentSelection();
   elements.playhead.style.left = `${secondsToPixels(state.playhead)}px`;
   elements.scroll.scrollLeft = Math.max(0, secondsToPixels(pointerTime) - pointerX);
 }
@@ -1334,6 +1578,8 @@ elements.scroll.addEventListener('scroll', () => {
   elements.timelineLabels.scrollTop = elements.scroll.scrollTop;
   updatePlayheadFollowIndicator();
   updateTimelineDragbar();
+  updateVisibleClipLoadingLabels();
+  renderVisibleTimelinePreviews();
   if (state.action?.type === 'marquee' && state.action.active) updateMarqueeSelection();
 });
 
@@ -1396,7 +1642,195 @@ window.addEventListener('resize', () => {
   updatePlayheadFollowIndicator();
   enforceMinTimelineZoom();
   updateTimelineDragbar();
+  renderSegmentSelection();
 });
+
+function snapSegmentTime(seconds) {
+  return Math.max(0, Math.round((Number(seconds) || 0) * 30) / 30);
+}
+
+function segmentTimeFromClientX(clientX) {
+  return snapSegmentTime(pixelsToSeconds(timelinePointFromClient(clientX, 0).x));
+}
+
+function clipsInSegmentRange() {
+  const range = state.segmentRange;
+  if (!range) return [];
+  return state.clips.filter((clip) =>
+    timelineModel.overlaps(clip.start, clip.start + clipDuration(clip), range.start, range.end)
+  );
+}
+
+function renderSegmentSelection() {
+  const range = state.segmentRange;
+  const hasDraft = Number.isFinite(state.segmentDraftStart);
+  const visible = state.segmentSelectionActive && (range || hasDraft);
+  elements.segmentSelection.hidden = !visible;
+  elements.qtSegmentCopy.setAttribute('aria-pressed', String(!elements.segmentCopyPopover.hidden));
+  updateExportSelectionButton();
+  if (!visible) return;
+
+  elements.segmentSelection.style.setProperty('--segment-line-height', `${Math.max(120, elements.timeline.scrollHeight || 300)}px`);
+  if (range) {
+    const left = secondsToPixels(range.start);
+    const right = secondsToPixels(range.end);
+    elements.segmentInPoint.hidden = false;
+    elements.segmentOutPoint.hidden = false;
+    elements.segmentInPoint.style.left = `${left}px`;
+    elements.segmentOutPoint.style.left = `${right}px`;
+    elements.segmentSelectionFill.hidden = false;
+    elements.segmentSelectionFill.style.left = `${left}px`;
+    elements.segmentSelectionFill.style.width = `${Math.max(1, right - left)}px`;
+    const count = clipsInSegmentRange().length;
+    const duration = range.end - range.start;
+    elements.newSegmentMeta.textContent = `${formatTime(range.start)}–${formatTime(range.end)} · ${duration.toFixed(0)} s · ${count} klipp`;
+    elements.newSegmentButton.disabled = count === 0;
+    elements.newSegmentButton.hidden = false;
+    elements.newSegmentButton.textContent = count ? 'Spara aktuell markering' : '＋ Nytt segment';
+    elements.copySegment.disabled = count === 0;
+    elements.saveSegment.disabled = count === 0 || !String(elements.segmentName.value || '').trim();
+    elements.segmentCopyStatus.textContent = count
+      ? `${formatTime(range.start)}–${formatTime(range.end)} · ${duration.toFixed(2)} s · ${count} klipp`
+      : `${formatTime(range.start)}–${formatTime(range.end)} · inga klipp i segmentet`;
+    return;
+  }
+
+  const left = secondsToPixels(state.segmentDraftStart);
+  elements.segmentInPoint.hidden = false;
+  elements.segmentInPoint.style.left = `${left}px`;
+  elements.segmentOutPoint.hidden = true;
+  elements.segmentSelectionFill.hidden = true;
+  elements.copySegment.disabled = true;
+  elements.saveSegment.disabled = true;
+  elements.newSegmentButton.disabled = false;
+  elements.newSegmentButton.hidden = false;
+  elements.newSegmentButton.textContent = '＋ Nytt segment';
+  elements.newSegmentMeta.textContent = 'Aktuell markering saknas.';
+  elements.segmentCopyStatus.textContent = `IN ${formatTime(state.segmentDraftStart)} · klicka ut UT i linjalen.`;
+}
+
+function openSegmentCopyTool() {
+  state.segmentSelectionActive = false;
+  state.segmentDraftStart = null;
+  state.segmentRange = null;
+  elements.segmentCopyPopover.hidden = false;
+  elements.segmentCopyStatus.textContent = 'Klicka på “Nytt segment” för att börja markera.';
+  elements.copySegment.disabled = true;
+  elements.newSegmentButton.disabled = false;
+  elements.newSegmentButton.hidden = false;
+  elements.newSegmentButton.textContent = '＋ Nytt segment';
+  renderSegmentSelection();
+}
+
+function closeSegmentCopyTool() {
+  state.segmentSelectionActive = false;
+  state.pendingSegmentImport = null;
+  document.body.classList.remove('segment-import-armed');
+  state.segmentPointDrag = null;
+  elements.newSegmentForm.hidden = true;
+  elements.newSegmentButton.setAttribute('aria-expanded', 'false');
+  elements.segmentCopyPopover.hidden = true;
+  renderSegmentSelection();
+}
+
+function resetSegmentSelection() {
+  state.segmentSelectionActive = false;
+  state.pendingSegmentImport = null;
+  document.body.classList.remove('segment-import-armed');
+  state.segmentDraftStart = null;
+  state.segmentRange = null;
+  elements.segmentCopyPopover.hidden = false;
+  elements.segmentCopyStatus.textContent = 'Klicka på “Nytt segment” för att börja markera.';
+  elements.copySegment.disabled = true;
+  elements.newSegmentButton.disabled = false;
+  elements.newSegmentButton.hidden = false;
+  elements.newSegmentButton.textContent = '＋ Nytt segment';
+  elements.newSegmentForm.hidden = true;
+  elements.newSegmentButton.setAttribute('aria-expanded', 'false');
+  elements.segmentName.value = '';
+  renderSegmentSelection();
+}
+
+function setSegmentPointFromRuler(event) {
+  if (!state.segmentSelectionActive) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const time = segmentTimeFromClientX(event.clientX);
+  if (state.segmentRange || !Number.isFinite(state.segmentDraftStart)) {
+    state.segmentRange = null;
+    state.segmentDraftStart = time;
+    renderSegmentSelection();
+    return;
+  }
+  if (Math.abs(time - state.segmentDraftStart) < MIN_CLIP_SECONDS) {
+    renderSegmentSelection();
+    elements.segmentCopyStatus.textContent = 'UT måste ligga minst 0,1 s från IN.';
+    return;
+  }
+  state.segmentRange = {
+    start: Math.min(state.segmentDraftStart, time),
+    end: Math.max(state.segmentDraftStart, time)
+  };
+  state.segmentDraftStart = null;
+  renderSegmentSelection();
+}
+
+function startSegmentRangeDrag(event) {
+  if (!state.segmentSelectionActive || state.pendingSegmentImport) return;
+  event.preventDefault();
+  event.stopPropagation();
+  state.segmentRangeDrag = true;
+  state.segmentRangeDragMoved = false;
+  state.segmentRangeDragStart = segmentTimeFromClientX(event.clientX);
+  state.segmentDraftStart = state.segmentRangeDragStart;
+  state.segmentRange = null;
+  renderSegmentSelection();
+}
+
+function moveSegmentRangeDrag(event) {
+  if (!state.segmentRangeDrag) return;
+  event.preventDefault();
+  const time = segmentTimeFromClientX(event.clientX);
+  if (Math.abs(time - state.segmentRangeDragStart) >= MIN_CLIP_SECONDS) state.segmentRangeDragMoved = true;
+  if (!state.segmentRangeDragMoved) return;
+  state.segmentRange = {
+    start: Math.min(state.segmentRangeDragStart, time),
+    end: Math.max(state.segmentRangeDragStart, time)
+  };
+  state.segmentDraftStart = null;
+  renderSegmentSelection();
+}
+
+function finishSegmentRangeDrag() {
+  if (!state.segmentRangeDrag) return;
+  state.segmentRangeDrag = false;
+  state.segmentRangeDragStart = null;
+  window.setTimeout(() => { state.segmentRangeDragMoved = false; }, 0);
+}
+
+function startSegmentPointDrag(role, event) {
+  if (!state.segmentRange) return;
+  if (!state.segmentSelectionActive) openSegmentCopyTool();
+  event.preventDefault();
+  event.stopPropagation();
+  state.segmentPointDrag = role;
+}
+
+function moveSegmentPointDrag(event) {
+  if (!state.segmentPointDrag || !state.segmentRange) return;
+  event.preventDefault();
+  const time = segmentTimeFromClientX(event.clientX);
+  if (state.segmentPointDrag === 'start') {
+    state.segmentRange.start = clamp(time, 0, state.segmentRange.end - MIN_CLIP_SECONDS);
+  } else {
+    state.segmentRange.end = Math.max(state.segmentRange.start + MIN_CLIP_SECONDS, time);
+  }
+  renderSegmentSelection();
+}
+
+function stopSegmentPointDrag() {
+  state.segmentPointDrag = null;
+}
 
 async function uploadFile(input) {
   const file = input.files?.[0];
@@ -1405,21 +1839,443 @@ async function uploadFile(input) {
   await uploadMedia(file);
 }
 
+async function selectMediaFromDisk({ addToTimeline = false } = {}) {
+  if (!ensureProjectNamed()) return;
+  try {
+    const result = await api('/api/media/select', { method: 'POST' });
+    if (result.cancelled) return;
+    const originalPlayhead = state.playhead;
+    for (const media of result.media || []) {
+      addMediaToProject(media);
+      addMediaLibraryItem(media);
+    }
+    if (addToTimeline && result.media?.length) {
+      openTrackPlacementModal({ type: 'media-import', media: result.media, originalPlayhead });
+    }
+    const count = (result.media || []).length;
+    const message = count === 1 ? `${result.media[0].name} importerad utan kopiering.` : `${count} mediefiler importerade utan kopiering.`;
+    if (addToTimeline) elements.status.textContent = 'Välj spår för att slutföra importen.';
+    else elements.mediaPoolStatus.textContent = message;
+  } catch (error) {
+    elements.status.textContent = `Kunde inte öppna filväljaren: ${error.message}`;
+    elements.mediaPoolStatus.textContent = error.message;
+  }
+}
+
 async function uploadMedia(file) {
+  if (!ensureProjectNamed()) return;
   const form = new FormData();
   form.append('media', file);
   elements.status.textContent = `Laddar ${file.name}…`;
   try {
     const media = await api('/api/media', { method: 'POST', body: form });
-    addMediaClip(media);
-    elements.status.textContent = state.nvenc ? 'NVIDIA CUDA/NVENC redo' : 'Uppladdad – NVIDIA GPU krävs för MP4-export';
+    openTrackPlacementModal({ type: 'media-import', media: [media], originalPlayhead: state.playhead });
+    elements.status.textContent = 'Välj spår för att slutföra importen.';
   } catch (error) {
     alert(`Uppladdningen misslyckades: ${error.message}`);
     elements.status.textContent = error.message;
   }
 }
 
-function addMediaClip(media) {
+async function uploadMediaToLibrary(file) {
+  if (!ensureProjectNamed()) return;
+  const form = new FormData();
+  form.append('media', file);
+  elements.mediaPoolStatus.textContent = `Importerar ${file.name}…`;
+  try {
+    const media = await api('/api/media', { method: 'POST', body: form });
+    addMediaToProject(media);
+    addMediaLibraryItem(media);
+    elements.mediaPoolStatus.textContent = `${media.name} ligger i mediebiblioteket.`;
+  } catch (error) {
+    elements.mediaPoolStatus.textContent = `Importen misslyckades: ${error.message}`;
+  }
+}
+
+function renderProjectName() {
+  const name = state.projectName || 'Namnlöst projekt';
+  if (elements.projectNameDisplay) {
+    elements.projectNameDisplay.textContent = name;
+    elements.projectNameDisplay.title = 'Dubbelklicka för att ändra projektnamnet';
+  }
+  if (elements.saveProjectName) elements.saveProjectName.hidden = !state.projectNameDirty;
+}
+
+function setProjectName(value) {
+  const name = String(value || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+  if (!name) return false;
+  const changed = name !== state.projectName;
+  state.projectName = name;
+  if (changed || state.projectNameDirty) state.projectNameDirty = name !== state.savedProjectName;
+  renderProjectName();
+  persist();
+  return true;
+}
+
+async function saveProjectName() {
+  if (!state.projectNameDirty) return;
+  persist();
+  await autoSaveProject();
+  state.savedProjectName = state.projectName;
+  state.projectNameDirty = false;
+  renderProjectName();
+}
+
+function ensureProjectNamed() {
+  if (state.projectName) return true;
+  if (typeof window.prompt !== 'function') return setProjectName('Nytt projekt');
+  if (/jsdom/i.test(navigator.userAgent)) return setProjectName('Nytt projekt');
+  try { return setProjectName(window.prompt('Döp projektet:', '')); }
+  catch (_error) { return setProjectName('Nytt projekt'); }
+}
+
+function askForProjectName() {
+  if (typeof window.prompt !== 'function') return setProjectName('Nytt projekt');
+  if (/jsdom/i.test(navigator.userAgent)) return setProjectName('Nytt projekt');
+  try { return setProjectName(window.prompt('Döp projektet:', state.projectName || '')); }
+  catch (_error) { return setProjectName('Nytt projekt'); }
+}
+
+function beginProjectNameEdit() {
+  const editor = elements.projectNameEditor;
+  const display = elements.projectNameDisplay;
+  if (!editor || !display) return;
+  editor.value = state.projectName || '';
+  display.hidden = true;
+  editor.hidden = false;
+  editor.focus();
+  editor.select();
+}
+
+function finishProjectNameEdit(save = true) {
+  const editor = elements.projectNameEditor;
+  const display = elements.projectNameDisplay;
+  if (!editor || !display || editor.hidden) return;
+  if (save) setProjectName(editor.value);
+  editor.hidden = true;
+  display.hidden = false;
+  renderProjectName();
+}
+
+elements.projectNameDisplay.addEventListener('dblclick', beginProjectNameEdit);
+elements.projectNameEditor.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') { event.preventDefault(); finishProjectNameEdit(true); }
+  if (event.key === 'Escape') { event.preventDefault(); finishProjectNameEdit(false); }
+});
+elements.projectNameEditor.addEventListener('blur', () => finishProjectNameEdit(true));
+elements.saveProjectName.addEventListener('click', () => {
+  saveProjectName().catch((error) => {
+    elements.status.textContent = `Kunde inte spara projektnamnet: ${error.message}`;
+  });
+});
+
+function mediaKindIcon(media) {
+  if (media.kind === 'video') return '▣';
+  if (media.kind === 'audio') return '♫';
+  return '▧';
+}
+
+function mediaDurationLabel(media) {
+  if (media.kind === 'image') return `${media.width || 0}×${media.height || 0}`;
+  const seconds = Number(media.duration);
+  return Number.isFinite(seconds) && seconds > 0 ? formatTime(seconds) : media.kind;
+}
+
+function addMediaLibraryItem(media) {
+  if (!media?.id) return;
+  const existing = state.mediaBin.findIndex((item) => item.id === media.id);
+  if (existing >= 0) state.mediaBin[existing] = media;
+  else state.mediaBin.push(media);
+  renderMediaBin();
+}
+
+function addMediaToProject(media) {
+  if (media?.id) state.projectMediaIds.add(media.id);
+}
+
+function insertionDomain(clip) {
+  return clip.kind === 'audio' ? `audio:${Math.max(0, Math.trunc(Number(clip.trackIndex) || 0))}` : `visual:${Number(clip.trackIndex) || 0}`;
+}
+
+function insertionDomainMatches(domain, clipDomain) {
+  if (domain === 'audio:*') return clipDomain.startsWith('audio:');
+  return domain === clipDomain;
+}
+
+function rippleInsert(start, duration, incomingClips, extraDomains = []) {
+  const amount = Number(duration) || 0;
+  if (amount <= 0) return;
+  const domains = new Set(extraDomains);
+  for (const clip of incomingClips || []) domains.add(insertionDomain(clip));
+  const crossing = state.clips.filter((clip) =>
+    [...domains].some((domain) => insertionDomainMatches(domain, insertionDomain(clip))) &&
+    clip.start < start - 1e-7 && clip.start + clipDuration(clip) > start + 1e-7
+  );
+  const crossingGroups = new Set(crossing.map((clip) => clip.linkGroupId).filter(Boolean));
+  const crossingIds = new Set(crossing.map((clip) => clip.id));
+  const completeCrossingGroups = new Set([...crossingGroups].filter((groupId) => {
+    const linked = state.clips.filter((clip) => clip.linkGroupId === groupId);
+    return linked.length > 1 && linked.every((clip) => crossingIds.has(clip.id));
+  }));
+  const rightIds = new Set();
+  const rightGroupIds = new Map();
+  const rightClips = [];
+  for (const clip of crossing) {
+    const oldEnd = clip.trimEnd;
+    const splitSource = clip.trimStart + start - clip.start;
+    clip.trimEnd = splitSource;
+    if (clip.transitionIn) delete clip.transitionIn;
+    const right = cloneValue(clip);
+    right.id = crypto.randomUUID();
+    right.start = start + amount;
+    right.trimStart = splitSource;
+    right.trimEnd = oldEnd;
+    if (clip.linkGroupId && completeCrossingGroups.has(clip.linkGroupId)) {
+      if (!rightGroupIds.has(clip.linkGroupId)) rightGroupIds.set(clip.linkGroupId, crypto.randomUUID());
+      right.linkGroupId = rightGroupIds.get(clip.linkGroupId);
+    } else {
+      delete right.linkGroupId;
+    }
+    rightClips.push(right);
+    rightIds.add(right.id);
+    renderClip(clip);
+  }
+  if (rightClips.length) {
+    state.clips.push(...rightClips);
+    rightClips.forEach(createClipElement);
+  }
+  const shiftedIds = new Set();
+  const shiftGroup = (groupId, delta) => {
+    const members = groupId
+      ? state.clips.filter((candidate) => candidate.linkGroupId === groupId)
+      : [];
+    const targets = members.length ? members : [];
+    for (const member of targets) {
+      if (rightIds.has(member.id) || shiftedIds.has(member.id)) continue;
+      member.start += delta;
+      if (member.transitionIn && Number.isFinite(Number(member.transitionIn.cut))) member.transitionIn.cut += delta;
+      shiftedIds.add(member.id);
+      renderClip(member);
+    }
+  };
+
+  // Ripple only through actual collisions. Gaps after the insertion point remain intact.
+  for (const domain of domains) {
+    let cursor = start + amount;
+    const clips = state.clips
+      .filter((clip) => !rightIds.has(clip.id) && insertionDomainMatches(domain, insertionDomain(clip)))
+      .filter((clip) => clip.start >= start - 1e-7)
+      .sort((left, right) => left.start - right.start);
+    for (const clip of clips) {
+      const end = clip.start + clipDuration(clip);
+      if (clip.start < cursor - 1e-7) {
+        const delta = cursor - clip.start;
+        shiftGroup(clip.linkGroupId, delta);
+        if (!clip.linkGroupId) {
+          clip.start += delta;
+          if (clip.transitionIn && Number.isFinite(Number(clip.transitionIn.cut))) clip.transitionIn.cut += delta;
+          shiftedIds.add(clip.id);
+          renderClip(clip);
+        }
+        cursor = Math.max(cursor, end + delta);
+      } else {
+        cursor = Math.max(cursor, end);
+      }
+    }
+  }
+}
+
+function renderMediaBin() {
+  const list = elements.mediaPoolList;
+  if (!list) return;
+  const projectMedia = state.mediaBin.filter((media) => state.projectMediaIds.has(media.id));
+  elements.mediaPoolCount.textContent = String(projectMedia.length);
+  list.replaceChildren(...projectMedia.map((media) => {
+    const item = document.createElement('div');
+    item.className = 'media-pool-item';
+    item.dataset.mediaId = media.id;
+    item.setAttribute('role', 'listitem');
+    const icon = document.createElement('span');
+    icon.className = 'media-pool-icon';
+    icon.textContent = mediaKindIcon(media);
+    icon.setAttribute('aria-hidden', 'true');
+    const info = document.createElement('div');
+    info.className = 'media-pool-name';
+    info.title = media.name;
+    info.textContent = media.name;
+    const meta = document.createElement('span');
+    meta.className = 'media-pool-meta';
+    meta.textContent = `${media.kind} · ${mediaDurationLabel(media)}`;
+    info.appendChild(meta);
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'media-pool-add';
+    add.textContent = 'Lägg till';
+    add.title = 'Lägg klippet på tidslinjen';
+    add.addEventListener('click', () => openTrackPlacementModal({
+      type: 'media-import', media: [media], originalPlayhead: state.playhead
+    }));
+    item.append(icon, info, add);
+    return item;
+  }));
+}
+
+async function loadMediaLibrary() {
+  try {
+    const media = await api('/api/media');
+    if (Array.isArray(media)) {
+      state.mediaBin = media;
+      media.forEach((item) => { if (item?.id) state.projectMediaIds.add(item.id); });
+      renderMediaBin();
+    }
+  } catch (_error) { /* mediebiblioteket är valfritt om servern inte svarar */ }
+}
+
+function placementDomain(kind) {
+  return kind === 'audio' ? 'audio' : 'visual';
+}
+
+function placementLabel(domain, index) {
+  return domain === 'audio' ? `LJUD ${index + 1}` : `V${index + 1}`;
+}
+
+function firstUnusedTrack(domain) {
+  const used = new Set(state.clips
+    .filter((clip) => placementDomain(clip.kind) === domain)
+    .map((clip) => Math.max(0, Math.trunc(Number(clip.trackIndex) || 0))));
+  let index = 0;
+  while (used.has(index)) index += 1;
+  return index;
+}
+
+function trackCount(domain) {
+  return domain === 'audio' ? state.audioTrackEls.length : state.visualTrackEls.length;
+}
+
+function openTrackPlacementModal(payload) {
+  if (!elements.trackPlacementModal || !elements.trackPlacementSelect) return false;
+  const media = payload.media || [];
+  const clips = payload.clipboard?.clips
+    || (payload.clipboard?.clip ? [payload.clipboard.clip] : null)
+    || payload.segment?.clips || [];
+  const kinds = [...media, ...clips].map((item) => placementDomain(item.kind));
+  const domain = kinds.includes('visual') ? 'visual' : 'audio';
+  const unused = firstUnusedTrack(domain);
+  const maxTracks = Math.max(1, trackCount(domain));
+  const fragment = document.createDocumentFragment();
+  const newOption = document.createElement('option');
+  newOption.value = `new:${unused}`;
+  newOption.textContent = `Nytt oanvänt spår (${placementLabel(domain, unused)})`;
+  fragment.appendChild(newOption);
+  for (let index = 0; index < maxTracks; index += 1) {
+    const option = document.createElement('option');
+    option.value = `track:${index}`;
+    option.textContent = placementLabel(domain, index);
+    fragment.appendChild(option);
+  }
+  elements.trackPlacementSelect.replaceChildren(fragment);
+  elements.trackPlacementSelect.value = `new:${unused}`;
+  elements.trackPlacementTitle.textContent = payload.type === 'clipboard-paste' ? 'Välj spår för inklistring' : 'Välj spår för import';
+  const count = media.length || clips.length;
+  elements.trackPlacementSummary.textContent = `${count} ${count === 1 ? 'objekt' : 'objekt'} väntar på placering. Standard är ett nytt oanvänt spår.`;
+  state.pendingTrackPlacement = { ...payload, domain };
+  elements.trackPlacementModal.hidden = false;
+  return true;
+}
+
+function selectedPlacementTrack() {
+  const value = elements.trackPlacementSelect?.value || '';
+  const match = /^(?:new|track):(\d+)$/.exec(value);
+  return match ? Math.max(0, Number(match[1])) : 0;
+}
+
+function applySegmentPlacement(copies, selectedTrack, domain) {
+  const byDomain = new Map();
+  for (const clip of copies) {
+    const clipDomain = placementDomain(clip.kind);
+    if (!byDomain.has(clipDomain)) byDomain.set(clipDomain, []);
+    byDomain.get(clipDomain).push(clip);
+  }
+  for (const [clipDomain, domainClips] of byDomain) {
+    const minimum = Math.min(...domainClips.map((clip) => Math.max(0, Math.trunc(Number(clip.trackIndex) || 0))));
+    const base = clipDomain === domain ? selectedTrack : firstUnusedTrack(clipDomain);
+    for (const clip of domainClips) {
+      clip.trackIndex = base + Math.max(0, Math.trunc(Number(clip.trackIndex) || 0)) - minimum;
+    }
+  }
+}
+
+function closeTrackPlacementModal() {
+  state.pendingTrackPlacement = null;
+  if (elements.trackPlacementModal) elements.trackPlacementModal.hidden = true;
+}
+
+function confirmTrackPlacement() {
+  const payload = state.pendingTrackPlacement;
+  if (!payload) return false;
+  const selectedTrack = selectedPlacementTrack();
+  closeTrackPlacementModal();
+  if (payload.type === 'media-import') {
+    const originalPlayhead = payload.originalPlayhead;
+    let nextImportAt = originalPlayhead;
+    const fallbackTracks = new Map();
+    for (const media of payload.media || []) {
+      const mediaDomain = placementDomain(media.kind);
+      if (!fallbackTracks.has(mediaDomain)) fallbackTracks.set(mediaDomain, firstUnusedTrack(mediaDomain));
+    }
+    for (const media of payload.media || []) {
+      addMediaClip(media, {
+        insertAtPlayhead: true,
+        atTime: nextImportAt,
+        trackIndex: placementDomain(media.kind) === payload.domain
+          ? selectedTrack
+          : fallbackTracks.get(placementDomain(media.kind))
+      });
+      nextImportAt += media.kind === 'image' ? 5 : (Number(media.duration) || 0);
+    }
+    setPlayhead(originalPlayhead);
+    elements.status.textContent = `${(payload.media || []).length} mediefiler placerade.`;
+    return true;
+  }
+  if (payload.type === 'clipboard-paste') {
+    const clipboard = payload.clipboard;
+    if (clipboard.type === 'segment') {
+      const destination = Number.isFinite(Number(payload.atTime)) ? Math.max(0, Number(payload.atTime)) : state.playhead;
+      const copies = timelineModel.materializeSegmentClips(clipboard, destination, () => crypto.randomUUID());
+      if (!copies.length) return false;
+      recordHistory();
+      applySegmentPlacement(copies, selectedTrack, payload.domain);
+      rippleInsert(destination, clipboard.duration, copies);
+      state.clips.push(...copies);
+      rebuildTrackLayout(copies.map((clip) => clip.id), { preserveTrackIndexes: true });
+      selectClips(copies.map((clip) => clip.id), copies[0].id);
+      if (copies.some((clip) => clip.mediaId === state.transcriptionMediaId)) renderTranscription();
+      persist();
+    } else {
+      insertClipCopy(clipboard.clip, Number.isFinite(Number(payload.atTime)) ? Math.max(0, Number(payload.atTime)) : state.playhead, selectedTrack);
+    }
+    return true;
+  }
+  if (payload.type === 'segment-import') {
+    const copies = timelineModel.materializeSegmentClips(payload.segment, payload.destination, () => crypto.randomUUID());
+    if (!copies.length) return false;
+    recordHistory();
+    applySegmentPlacement(copies, selectedTrack, payload.domain);
+    rippleInsert(payload.destination, payload.segment.duration, copies);
+    state.clips.push(...copies);
+    rebuildTrackLayout(copies.map((clip) => clip.id), { preserveTrackIndexes: true });
+    selectClips(copies.map((clip) => clip.id), copies[0].id);
+    setPlayhead(payload.destination);
+    persist();
+    elements.segmentCopyStatus.textContent = `“${payload.segment.name}” importerades som kopia.`;
+    return true;
+  }
+  return false;
+}
+
+function addMediaClip(media, options = {}) {
+  addMediaToProject(media);
+  addMediaLibraryItem(media);
   recordHistory();
   const kind = media.kind;
   const isVisual = kind !== 'audio';
@@ -1428,20 +2284,23 @@ function addMediaClip(media) {
     syncCanvasControls();
     updatePreviewWindowSize();
   }
+  const initialDuration = kind === 'image' ? 5 : media.duration;
   const lastEnd = state.clips.filter((clip) => isVisual
     ? (clip.kind === 'video' || clip.kind === 'image')
     : clip.kind === 'audio')
     .reduce((end, clip) => Math.max(end, clip.start + clipDuration(clip)), 0);
-  const initialDuration = kind === 'image' ? 5 : media.duration;
-  const requestedLayer = isVisual && Number.isInteger(state.importLayer) ? state.importLayer : null;
-  const trackIndex = requestedLayer != null
-    ? requestedLayer
-    : allocateTrack(kind, lastEnd, lastEnd + initialDuration);
+  const start = Number.isFinite(Number(options.atTime))
+    ? Math.max(0, Number(options.atTime))
+    : options.insertAtPlayhead === true ? state.playhead : lastEnd;
+  const requestedLayer = Number.isInteger(options.trackIndex)
+    ? Math.max(0, options.trackIndex)
+    : isVisual && Number.isInteger(state.importLayer) ? state.importLayer : null;
+  const trackIndex = requestedLayer != null ? requestedLayer : 0;
   const clip = {
     id: crypto.randomUUID(), mediaId: media.id, name: media.name, kind,
     mediaDuration: kind === 'image' ? MAX_IMAGE_SECONDS : media.duration,
     sourceWidth: media.width, sourceHeight: media.height,
-    start: lastEnd, trimStart: 0, trimEnd: initialDuration,
+    start, trimStart: 0, trimEnd: initialDuration,
     crop: { left: 0, right: 0, top: 0, bottom: 0 },
     visualScale: 1,
     posX: 0,
@@ -1449,11 +2308,13 @@ function addMediaClip(media) {
     circular: null,
     trackIndex
   };
+  const extraDomains = kind === 'video' && media.hasAudio ? ['audio:*'] : [];
+  rippleInsert(start, initialDuration, [clip], extraDomains);
   state.clips.push(clip);
   if (requestedLayer != null) {
     state.selectedId = clip.id;
     state.selectedIds = new Set([clip.id]);
-    rebuildTrackLayout([clip.id]);
+    rebuildTrackLayout([clip.id], { preserveTrackIndexes: Number.isInteger(options.trackIndex) });
   } else {
     createClipElement(clip);
     selectClip(clip.id);
@@ -1463,17 +2324,96 @@ function addMediaClip(media) {
   return clip;
 }
 
+function videoClipAtPlayhead() {
+  return state.clips
+    .filter((clip) =>
+      clip.kind === 'video' &&
+      layerVisible(clip.trackIndex || 0) &&
+      state.playhead >= clip.start &&
+      state.playhead < clip.start + clipDuration(clip)
+    )
+    .sort((a, b) => (b.trackIndex || 0) - (a.trackIndex || 0))[0] || null;
+}
+
+async function captureStillFrame() {
+  const source = videoClipAtPlayhead();
+  if (!source) {
+    elements.status.textContent = 'Ingen video vid playhead att ta stillbild från.';
+    elements.status.className = 'status warning';
+    return false;
+  }
+  const start = state.playhead;
+  const sourceTime = source.trimStart + start - source.start;
+  elements.quickStillFrame.disabled = true;
+  elements.quickStillFrame.setAttribute('aria-busy', 'true');
+  elements.status.textContent = `Tar stillbild vid ${formatTimelineTimecode(start)}…`;
+  try {
+    const media = await api(`/api/media/${encodeURIComponent(source.mediaId)}/still`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ time: sourceTime })
+    });
+    const remaining = source.start + clipDuration(source) - start;
+    const stillDuration = Math.max(MIN_CLIP_SECONDS, Math.min(5, remaining));
+    const end = start + stillDuration;
+    const topTrack = state.clips
+      .filter((clip) =>
+        VISUAL_KINDS.includes(clip.kind) &&
+        clip.start < end && start < clip.start + clipDuration(clip)
+      )
+      .reduce((highest, clip) => Math.max(highest, clip.trackIndex || 0), -1);
+    const still = {
+      id: crypto.randomUUID(),
+      mediaId: media.id,
+      name: media.name,
+      kind: 'image',
+      mediaDuration: MAX_IMAGE_SECONDS,
+      sourceWidth: media.width,
+      sourceHeight: media.height,
+      start,
+      trimStart: 0,
+      trimEnd: stillDuration,
+      crop: { left: 0, right: 0, top: 0, bottom: 0 },
+      visualScale: 1,
+      posX: 0,
+      posY: 0,
+      circular: null,
+      trackIndex: topTrack + 1
+    };
+    addMediaToProject(media);
+    addMediaLibraryItem(media);
+    recordHistory();
+    state.clips.push(still);
+    createClipElement(still);
+    selectClip(still.id);
+    setPlayhead(start);
+    persist();
+    elements.status.textContent = `Stillbild skapad på lager V${still.trackIndex + 1}.`;
+    elements.status.className = 'status ok';
+    return true;
+  } catch (error) {
+    elements.status.textContent = `Kunde inte ta stillbild: ${error.message}`;
+    elements.status.className = 'status warning';
+    return false;
+  } finally {
+    elements.quickStillFrame.disabled = false;
+    elements.quickStillFrame.removeAttribute('aria-busy');
+  }
+}
+
 async function autoSplitAudio(videoClip) {
   const source = videoClip;
+  const sourceId = source.id;
+  const sourceMediaId = source.mediaId;
   const existingPartner = timelineModel.linkedPartner(state.clips, source);
   if (existingPartner?.kind === 'audio') return existingPartner;
-  source.muted = true;
-  renderClip(source);
-  persist();
   try {
     const audioMedia = await api(`/api/media/${encodeURIComponent(source.mediaId)}/extract-audio`, { method: 'POST' });
-    if (!state.clips.some((clip) => clip.id === source.id)) return null;
-    const trackIndex = allocateTrack('audio', source.start, source.start + clipDuration(source));
+    addMediaToProject(audioMedia);
+    addMediaLibraryItem(audioMedia);
+    const currentSource = state.clips.find((clip) => clip.id === sourceId);
+    if (!currentSource || currentSource.mediaId !== sourceMediaId || currentSource.kind !== 'video') return null;
+    const trackIndex = allocateTrack('audio', currentSource.start, currentSource.start + clipDuration(currentSource));
     const linkGroupId = crypto.randomUUID();
     const extractedDuration = audioMedia.duration || source.mediaDuration;
     const audioClip = {
@@ -1484,17 +2424,21 @@ async function autoSplitAudio(videoClip) {
       mediaDuration: extractedDuration,
       sourceWidth: 0,
       sourceHeight: 0,
-      start: source.start,
-      trimStart: source.trimStart,
-      trimEnd: Math.min(source.trimEnd, extractedDuration),
+      start: currentSource.start,
+      trimStart: currentSource.trimStart,
+      trimEnd: Math.min(currentSource.trimEnd, extractedDuration),
       crop: { left: 0, right: 0, top: 0, bottom: 0 },
       muted: false,
       trackIndex,
       linkGroupId
     };
-    source.linkGroupId = linkGroupId;
+    currentSource.linkGroupId = linkGroupId;
+    // Keep the embedded track audible until the extracted audio is ready.
+    // Muting before the asynchronous extraction completed made the preview
+    // completely silent whenever extraction was slow or temporarily failed.
+    currentSource.muted = true;
     state.clips.push(audioClip);
-    renderClip(source);
+    renderClip(currentSource);
     createClipElement(audioClip);
     renderTimelineLinkConnectors();
     updateTimelineWidth();
@@ -1615,6 +2559,13 @@ async function pollTranscribeJob(id) {
       state.transcriptionMediaId = job.mediaId;
       state.transcriptionSegments = job.segments || [];
       rebuildTranscriptionIndex();
+      const selectedSource = transcriptionSourceForSelectedClip(
+        state.clips.find((candidate) => candidate.id === state.selectedId)
+      );
+      if (selectedSource) {
+        state.selectedTranscriptionSourceClipId = selectedSource.id;
+        state.selectedTranscriptionSegmentIndex = transcriptionSegmentForSourceClip(selectedSource);
+      }
       renderTranscription();
       syncExportSubtitlesPrefill();
       persist();
@@ -1670,42 +2621,304 @@ async function cancelTranscribeJob() {
 }
 
 function renderTranscription() {
-  const rendered = [];
-  const sourceClips = state.clips.filter((clip) =>
-    (clip.kind === 'video' || clip.kind === 'audio') && clip.mediaId === state.transcriptionMediaId
-  );
-  for (const clip of sourceClips) {
-    state.transcriptionSegments.forEach((segment, segmentIndex) => {
-      const sourceStart = Math.max(Number(segment.start) || 0, clip.trimStart);
-      const sourceEnd = Math.min(Number(segment.end) || sourceStart, clip.trimEnd);
-      if (sourceEnd <= sourceStart) return;
-      const timelineStart = clip.start + sourceStart - clip.trimStart;
-      const timelineEnd = clip.start + sourceEnd - clip.trimStart;
-      const element = document.createElement('div');
-      element.className = 'clip transcription';
-      element.dataset.segmentIndex = String(segmentIndex);
-      element.dataset.sourceClipId = clip.id;
-      element.dataset.timelineStart = String(timelineStart);
-      const timecode = document.createElement('span');
-      timecode.className = 'transcription-time';
-      timecode.textContent = formatTime(timelineStart);
-      const text = document.createElement('span');
-      text.className = 'transcription-text';
-      text.textContent = (segment.text || '').trim() || '(tomt)';
-      element.append(timecode, text);
-      element.style.left = `${secondsToPixels(timelineStart)}px`;
-      element.style.width = `${Math.max(8, secondsToPixels(Math.max(0.1, timelineEnd - timelineStart)))}px`;
-      element.title = `${formatTime(timelineStart)}–${formatTime(timelineEnd)}\n${(segment.text || '').trim()}`;
-      element.addEventListener('dblclick', () => setPlayhead(timelineStart));
-      rendered.push(element);
-    });
+  if (state.selectedTranscriptionSegmentIndex >= state.transcriptionSegments.length) {
+    state.selectedTranscriptionSegmentIndex = -1;
+    state.selectedTranscriptionSourceClipId = null;
   }
-  elements.transcriptionTrack.replaceChildren(...rendered);
+  elements.transcriptionTrack.replaceChildren();
   updateTranscriptSearch();
+  updateTranscriptionTools();
   updateTimelineWidth();
 }
 
-let transcriptionEditSegmentIndex = -1;
+function parseTranscriptionTimestamp(rawValue) {
+  const value = String(rawValue ?? '').trim().replace(',', '.');
+  if (!value) return null;
+  const parts = value.split(':');
+  if (parts.length > 3 || parts.some((part) => part === '' || !/^\d+(?:\.\d+)?$/.test(part))) return null;
+  if (parts.length === 1) {
+    const seconds = Number(parts[0]);
+    return Number.isFinite(seconds) && seconds >= 0 ? Math.round(seconds * 1000) / 1000 : null;
+  }
+  const values = parts.map(Number);
+  if (values.slice(1).some((part) => part >= 60)) return null;
+  let seconds = 0;
+  for (const part of values) seconds = seconds * 60 + part;
+  return Number.isFinite(seconds) ? Math.round(seconds * 1000) / 1000 : null;
+}
+
+function rebuildTranscriptionWords(segment) {
+  const text = String(segment.text || '').trim();
+  const words = text.split(/\s+/).filter(Boolean);
+  const start = Number(segment.start) || 0;
+  const end = Number(segment.end) || start + 0.5;
+  const span = Math.max(0.001, end - start);
+  segment.words = words.map((word, index) => ({
+    word,
+    start: Math.round((start + (span * index) / words.length) * 1000) / 1000,
+    end: Math.round((start + (span * (index + 1)) / words.length) * 1000) / 1000
+  }));
+}
+
+function transcriptionTimelineTimeForSourceTime(sourceTime, preferredSourceClipId = null) {
+  const candidates = state.clips
+    .filter((clip) =>
+      (clip.kind === 'video' || clip.kind === 'audio') && clip.mediaId === state.transcriptionMediaId
+    )
+    .sort((a, b) => Number(b.id === preferredSourceClipId) - Number(a.id === preferredSourceClipId));
+  const clip = candidates.find((candidate) => sourceTime >= candidate.trimStart && sourceTime < candidate.trimEnd);
+  if (!clip) return state.playhead;
+  return clip.start + sourceTime - clip.trimStart;
+}
+
+function formatTranscriptionForEditor(segments = state.transcriptionSegments) {
+  return (segments || []).map((segment) =>
+    `[${formatTime(Number(segment.start) || 0)}–${formatTime(Number(segment.end) || 0)}] ${String(segment.text || '').trim()}`
+  ).join('\n');
+}
+
+function parseTranscriptionEditorLine(rawLine, lineNumber, segmentIndex) {
+  const line = String(rawLine || '').trim();
+  const match = line.match(/^\[(.+?)\s*[–-]\s*(.+?)\]\s+(.+)$/);
+  if (!match) return { error: `Rad ${lineNumber}: använd formatet [start–slut] text.` };
+  const start = parseTranscriptionTimestamp(match[1]);
+  const end = parseTranscriptionTimestamp(match[2]);
+  const text = match[3].trim();
+  if (start === null || end === null || end - start < 0.05) {
+    return { error: `Rad ${lineNumber}: slut måste ligga efter start.` };
+  }
+  if (!text) return { error: `Rad ${lineNumber}: texten får inte vara tom.` };
+  const segment = state.transcriptionSegments[segmentIndex]
+    ? cloneValue(state.transcriptionSegments[segmentIndex])
+    : {};
+  segment.start = start;
+  segment.end = end;
+  segment.text = text;
+  rebuildTranscriptionWords(segment);
+  return { segment };
+}
+
+function parseTranscriptionEditor(rawValue) {
+  const lines = String(rawValue || '').split(/\r?\n/)
+    .map((line, index) => ({ line: line.trim(), lineNumber: index + 1 }))
+    .filter((item) => item.line);
+  if (!lines.length) return { error: 'Transkriberingen får inte vara tom.' };
+  const segments = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const { line, lineNumber } = lines[index];
+    const parsed = parseTranscriptionEditorLine(line, lineNumber, index);
+    if (parsed.error) return parsed;
+    segments.push(parsed.segment);
+  }
+  return { segments };
+}
+
+let transcriptionEditorHighlightIndex = -1;
+let transcriptionEditorHighlightSegmentIndex = -1;
+
+function syncTranscriptionHighlightScroll() {
+  elements.transcriptionEditorHighlightLines.style.transform =
+    `translateY(${-elements.transcriptionEditorAll.scrollTop}px)`;
+}
+
+function editorLineIndexForSegment(segmentIndex) {
+  if (segmentIndex < 0) return -1;
+  const lines = elements.transcriptionEditorAll.value.split(/\r?\n/);
+  let currentSegment = -1;
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    if (!lines[lineIndex].trim()) continue;
+    currentSegment += 1;
+    if (currentSegment === segmentIndex) return lineIndex;
+  }
+  return -1;
+}
+
+function scrollTranscriptionEditorLineIntoView(lineIndex) {
+  if (lineIndex < 0) return;
+  const editor = elements.transcriptionEditorAll;
+  const style = getComputedStyle(editor);
+  const fontSize = parseFloat(style.fontSize) || 12;
+  const parsedLineHeight = parseFloat(style.lineHeight);
+  const lineHeight = Number.isFinite(parsedLineHeight)
+    ? (style.lineHeight.endsWith('px') ? parsedLineHeight : parsedLineHeight * fontSize)
+    : fontSize * 1.55;
+  const paddingTop = parseFloat(style.paddingTop) || 0;
+  const paddingBottom = parseFloat(style.paddingBottom) || 0;
+  const lineTop = paddingTop + lineIndex * lineHeight;
+  const lineBottom = lineTop + lineHeight;
+  const viewportTop = editor.scrollTop;
+  const viewportBottom = viewportTop + editor.clientHeight;
+  const margin = lineHeight;
+  if (lineTop - margin < viewportTop) {
+    editor.scrollTop = Math.max(0, lineTop - margin);
+  } else if (lineBottom + margin + paddingBottom > viewportBottom) {
+    editor.scrollTop = lineBottom + margin + paddingBottom - editor.clientHeight;
+  } else {
+    return;
+  }
+  syncTranscriptionHighlightScroll();
+}
+
+function setTranscriptionEditorHighlight(segmentIndex) {
+  if (segmentIndex === transcriptionEditorHighlightSegmentIndex) return;
+  const lineIndex = editorLineIndexForSegment(segmentIndex);
+  const previous = elements.transcriptionEditorHighlightLines.children[transcriptionEditorHighlightIndex];
+  if (previous) previous.classList.remove('active');
+  const current = elements.transcriptionEditorHighlightLines.children[lineIndex];
+  if (current) current.classList.add('active');
+  transcriptionEditorHighlightIndex = current ? lineIndex : -1;
+  transcriptionEditorHighlightSegmentIndex = current ? segmentIndex : -1;
+  if (current) scrollTranscriptionEditorLineIntoView(lineIndex);
+}
+
+function syncTranscriptionHighlightLines() {
+  const lineCount = elements.transcriptionEditorAll.value.split(/\r?\n/).length;
+  if (elements.transcriptionEditorHighlightLines.children.length !== lineCount) {
+    const lines = Array.from({ length: lineCount }, () => {
+      const line = document.createElement('div');
+      line.className = 'transcription-editor-highlight-line';
+      return line;
+    });
+    elements.transcriptionEditorHighlightLines.replaceChildren(...lines);
+    transcriptionEditorHighlightIndex = -1;
+    transcriptionEditorHighlightSegmentIndex = -1;
+  }
+  updateTranscriptionPlayheadHighlight();
+  syncTranscriptionHighlightScroll();
+}
+
+function transcriptionSegmentAtPlayhead() {
+  const isActiveSourceClip = (clip) => (
+      (clip.kind === 'video' || clip.kind === 'audio') &&
+      clip.mediaId === state.transcriptionMediaId &&
+      state.playhead >= clip.start && state.playhead < clip.start + clipDuration(clip)
+  );
+  const sourceClip = state.clips.find((clip) =>
+    clip.id === state.selectedTranscriptionSourceClipId && isActiveSourceClip(clip)
+  ) || state.clips.find(isActiveSourceClip);
+  if (!sourceClip) return -1;
+  const sourceTime = sourceClip.trimStart + state.playhead - sourceClip.start;
+  const currentIndex = transcriptionEditorHighlightSegmentIndex >= 0
+    ? transcriptionEditorHighlightSegmentIndex
+    : state.selectedTranscriptionSegmentIndex;
+  const current = state.transcriptionSegments[currentIndex];
+  if (current && sourceTime >= Number(current.start) && sourceTime < Number(current.end)) {
+    return currentIndex;
+  }
+  return state.transcriptionSegments.findIndex((segment) =>
+    sourceTime >= Number(segment.start) && sourceTime < Number(segment.end)
+  );
+}
+
+function updateTranscriptionPlayheadHighlight() {
+  if (elements.transcriptionTools.hidden) {
+    setTranscriptionEditorHighlight(-1);
+    return;
+  }
+  setTranscriptionEditorHighlight(transcriptionSegmentAtPlayhead());
+}
+
+function jumpToTranscriptionEditorLine() {
+  const editor = elements.transcriptionEditorAll;
+  const caret = Math.max(0, editor.selectionStart || 0);
+  const lines = editor.value.split(/\r?\n/);
+  const lineIndex = editor.value.slice(0, caret).split(/\r?\n/).length - 1;
+  if (!lines[lineIndex]?.trim()) return;
+  const segmentIndex = lines.slice(0, lineIndex + 1).filter((line) => line.trim()).length - 1;
+  const parsed = parseTranscriptionEditorLine(lines[lineIndex], lineIndex + 1, segmentIndex);
+  if (parsed.error) return;
+  state.selectedTranscriptionSegmentIndex = segmentIndex;
+  const sourceClipId = state.selectedTranscriptionSourceClipId;
+  elements.info.textContent = `Transkription · segment ${segmentIndex + 1} av ${state.transcriptionSegments.length}`;
+  setPlayhead(transcriptionTimelineTimeForSourceTime(parsed.segment.start, sourceClipId));
+  setTranscriptionEditorHighlight(segmentIndex);
+}
+
+function renderTranscriptionTools() {
+  const selectedIndex = state.selectedTranscriptionSegmentIndex;
+  const visible = selectedIndex >= 0 && Boolean(state.transcriptionSegments[selectedIndex]);
+  elements.transcriptionTools.hidden = !visible;
+  if (!visible) return;
+
+  elements.transcriptionToolsSummary.value = `${state.transcriptionSegments.length} segment · källtider`;
+  elements.transcriptionEditorAll.readOnly = !state.transcriptionEditMode;
+  elements.editTranscription.textContent = state.transcriptionEditMode ? 'Klar' : 'Redigera';
+  elements.saveAllTranscription.disabled = false;
+  const text = formatTranscriptionForEditor();
+  elements.transcriptionEditorAll.value = text;
+  elements.transcriptionEditorError.value = '';
+  elements.transcriptionCopyStatus.value = '';
+  syncTranscriptionHighlightLines();
+  updateTranscriptSearch();
+}
+
+function setTranscriptionEditMode(enabled) {
+  state.transcriptionEditMode = Boolean(enabled);
+  renderTranscriptionTools();
+  if (state.transcriptionEditMode) {
+    elements.transcriptionEditorAll.focus();
+    elements.transcriptionCopyStatus.value = 'Redigeringsläge aktivt.';
+  }
+}
+
+function updateTranscriptionTools() {
+  renderTranscriptionTools();
+}
+
+function saveAllTranscription() {
+  if (!state.transcriptionEditMode) {
+    elements.transcriptionCopyStatus.value = 'Inga ändringar att spara.';
+    return true;
+  }
+  const parsed = parseTranscriptionEditor(elements.transcriptionEditorAll.value);
+  if (parsed.error) {
+    elements.transcriptionEditorError.value = parsed.error;
+    return false;
+  }
+  if (formatTranscriptionForEditor(parsed.segments) === formatTranscriptionForEditor()) {
+    elements.transcriptionEditorError.value = '';
+    elements.transcriptionCopyStatus.value = 'Inga ändringar att spara.';
+    return true;
+  }
+  recordHistory();
+  state.transcriptionSegments = parsed.segments;
+  state.selectedTranscriptionSegmentIndex = Math.min(
+    state.selectedTranscriptionSegmentIndex,
+    state.transcriptionSegments.length - 1
+  );
+  rebuildTranscriptionIndex();
+  renderTranscription();
+  renderTranscriptOverlay(state.playhead);
+  elements.transcriptionCopyStatus.value = 'Alla ändringar har sparats.';
+  persist();
+  return true;
+}
+
+async function copyAllTranscription() {
+  const text = formatTranscriptionForEditor();
+  if (!text) return false;
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('Clipboard API saknas');
+    await navigator.clipboard.writeText(text);
+    elements.transcriptionCopyStatus.value = 'Hela transkriberingen har kopierats.';
+    return true;
+  } catch (_error) {
+    const fallback = document.createElement('textarea');
+    fallback.value = text;
+    fallback.readOnly = true;
+    fallback.style.position = 'fixed';
+    fallback.style.opacity = '0';
+    document.body.appendChild(fallback);
+    fallback.select();
+    const copied = typeof document.execCommand === 'function' && document.execCommand('copy');
+    fallback.remove();
+    elements.transcriptionCopyStatus.value = copied
+      ? 'Hela transkriberingen har kopierats.'
+      : 'Kunde inte kopiera till urklippet.';
+    return copied;
+  }
+}
+
 let transcriptSearchFocused = false;
 
 function renderFlags() {
@@ -1907,53 +3120,6 @@ elements.saveFlag.addEventListener('click', saveFlagEditor);
 elements.deleteFlag.addEventListener('click', deleteFlagEditor);
 elements.closeFlagEdit.addEventListener('click', closeFlagEditor);
 
-function openTranscriptionEditor(segmentIndex) {
-  const segment = state.transcriptionSegments[segmentIndex];
-  if (!segment) return;
-  transcriptionEditSegmentIndex = segmentIndex;
-  elements.transcriptionEditTime.textContent =
-    `${formatTime(Number(segment.start) || 0)}–${formatTime(Number(segment.end) || 0)}`;
-  elements.transcriptionEditText.value = (segment.text || '').trim();
-  elements.transcriptionEditModal.hidden = false;
-  elements.transcriptionEditText.focus();
-}
-
-function closeTranscriptionEditor() {
-  elements.transcriptionEditModal.hidden = true;
-  transcriptionEditSegmentIndex = -1;
-}
-
-function saveTranscriptionEdit() {
-  const segmentIndex = transcriptionEditSegmentIndex;
-  const segment = state.transcriptionSegments[segmentIndex];
-  if (!segment) return;
-  const newText = elements.transcriptionEditText.value.trim();
-  if (!newText) {
-    elements.transcriptionEditText.focus();
-    return;
-  }
-  if (newText === (segment.text || '').trim()) {
-    closeTranscriptionEditor();
-    return;
-  }
-  recordHistory();
-  segment.text = newText;
-  const start = Number(segment.start) || 0;
-  const end = Number(segment.end) || start + 0.5;
-  const words = newText.split(/\s+/).filter(Boolean);
-  const span = Math.max(0.001, end - start);
-  segment.words = words.map((word, index) => ({
-    word,
-    start: Math.round((start + (span * index) / words.length) * 1000) / 1000,
-    end: Math.round((start + (span * (index + 1)) / words.length) * 1000) / 1000
-  }));
-  rebuildTranscriptionIndex();
-  renderTranscription();
-  renderTranscriptOverlay(state.playhead);
-  persist();
-  closeTranscriptionEditor();
-}
-
 function normalizeSearchWord(value) {
   return String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('sv-SE');
 }
@@ -1978,54 +3144,88 @@ function rebuildTranscriptionIndex() {
   });
 }
 
-function findIndexedSegmentIds(query) {
-  const terms = [...new Set(tokenizeTranscript(query))];
-  if (terms.length === 0) return [];
-  const postings = terms.map((term) => state.transcriptionIndex.get(term));
-  if (postings.some((posting) => !posting)) return [];
-  return [...postings[0].keys()].filter((segmentIndex) => postings.every((posting) => posting.has(segmentIndex)));
+function transcriptionEditorSearchEntries() {
+  if (!elements.transcriptionTools.hidden && elements.transcriptionEditorAll.value.trim()) {
+    let segmentIndex = -1;
+    return elements.transcriptionEditorAll.value.split(/\r?\n/).flatMap((rawLine, lineIndex) => {
+      const line = rawLine.trim();
+      if (!line) return [];
+      segmentIndex += 1;
+      const match = line.match(/^\[(.+?)\s*[–-]\s*(.+?)\]\s*(.*)$/);
+      const text = (match?.[3] || line).trim();
+      const parsedStart = match ? parseTranscriptionTimestamp(match[1]) : null;
+      return [{
+        segmentIndex,
+        lineIndex,
+        text,
+        start: parsedStart ?? (Number(state.transcriptionSegments[segmentIndex]?.start) || 0),
+        tokens: new Set(tokenizeTranscript(text))
+      }];
+    });
+  }
+  return state.transcriptionSegments.map((segment, segmentIndex) => ({
+    segmentIndex,
+    lineIndex: segmentIndex,
+    text: String(segment.text || '').trim(),
+    start: Number(segment.start) || 0,
+    tokens: new Set(tokenizeTranscript(segment.text))
+  }));
+}
+
+function transcriptionIndexTimesForTerm(term, segmentIndex) {
+  const times = [];
+  for (const [word, segmentTimes] of state.transcriptionIndex) {
+    if (!word.includes(term)) continue;
+    times.push(...(segmentTimes.get(segmentIndex) || []).filter(Number.isFinite));
+  }
+  return times;
+}
+
+function transcriptionSearchTimelineLocation(entry, terms) {
+  const termTimeGroups = terms.map((term) => {
+    const times = transcriptionIndexTimesForTerm(term, entry.segmentIndex);
+    return times.length ? times : [entry.start];
+  });
+  const candidates = state.clips
+    .filter((clip) =>
+      (clip.kind === 'video' || clip.kind === 'audio') && clip.mediaId === state.transcriptionMediaId
+    )
+    .sort((a, b) => Number(b.id === state.selectedTranscriptionSourceClipId) - Number(a.id === state.selectedTranscriptionSourceClipId));
+  for (const clip of candidates) {
+    const timesInClip = termTimeGroups.map((times) =>
+      times.filter((sourceTime) => sourceTime >= clip.trimStart && sourceTime < clip.trimEnd)
+    );
+    if (timesInClip.some((times) => times.length === 0)) continue;
+    const sourceTime = Math.min(...timesInClip.flat());
+    return {
+      sourceClipId: clip.id,
+      time: clip.start + sourceTime - clip.trimStart
+    };
+  }
+  return null;
 }
 
 function updateTranscriptSearch() {
   const query = elements.transcriptSearchInput.value.trim();
   const terms = [...new Set(tokenizeTranscript(query))];
-  const segmentIds = new Set(findIndexedSegmentIds(query));
-  const matches = [...elements.transcriptionTrack.querySelectorAll('.clip.transcription')].flatMap((element) => {
-    const segmentIndex = Number(element.dataset.segmentIndex);
-    if (!segmentIds.has(segmentIndex)) return [];
-    const clip = state.clips.find((item) => item.id === element.dataset.sourceClipId);
-    if (!clip) return [];
-    const termTimes = terms.map((term) =>
-      (state.transcriptionIndex.get(term)?.get(segmentIndex) || [])
-        .filter((time) => time >= clip.trimStart && time < clip.trimEnd)
-    );
-    if (termTimes.some((times) => times.length === 0)) return [];
-    const sourceTime = Math.min(...termTimes.flat());
-    return [{
-      element,
-      segmentIndex,
-      time: clip.start + sourceTime - clip.trimStart,
-      text: String(state.transcriptionSegments[segmentIndex]?.text || '').trim() || '(tomt)'
-    }];
-  }).sort((a, b) => a.time - b.time);
-  elements.transcriptionTrack.querySelectorAll('.clip.transcription').forEach((element) => {
-    element.classList.toggle('search-match', matches.some((match) => match.element === element));
-    element.classList.remove('search-current');
-  });
+  const matches = terms.length === 0 ? [] : transcriptionEditorSearchEntries()
+    .filter((entry) => terms.every((term) => [...entry.tokens].some((word) => word.includes(term))))
+    .map((entry) => ({ ...entry, location: transcriptionSearchTimelineLocation(entry, terms) }));
   state.transcriptSearchResults = matches;
   state.transcriptSearchCursor = -1;
   elements.transcriptSearchResults.replaceChildren(...matches.map((match, index) => {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'transcript-search-result';
+    if (!match.location) button.classList.add('outside-timeline');
     button.dataset.resultIndex = String(index);
     button.setAttribute('role', 'option');
     const time = document.createElement('span');
     time.className = 'transcript-result-time';
-    time.textContent = formatTime(match.time);
+    time.textContent = match.location ? formatTime(match.location.time) : 'Bortklippt';
     const text = document.createElement('span');
     text.className = 'transcript-result-text';
-    text.textContent = match.text;
+    text.textContent = match.text || '(tomt)';
     button.append(time, text);
     button.addEventListener('click', () => activateTranscriptSearchResult(index));
     return button;
@@ -2053,14 +3253,20 @@ function activateTranscriptSearchResult(index) {
   const current = results[index];
   if (!current) return;
   state.transcriptSearchCursor = index;
-  results.forEach((result, resultIndex) => result.element.classList.toggle('search-current', resultIndex === index));
   elements.transcriptSearchResults.querySelectorAll('.transcript-search-result').forEach((button, resultIndex) => {
     button.classList.toggle('current', resultIndex === index);
     button.setAttribute('aria-selected', String(resultIndex === index));
   });
-  setPlayhead(current.time);
-  current.element.scrollIntoView?.({ behavior: 'smooth', block: 'nearest', inline: 'center' });
-  elements.transcriptSearchStatus.value = `${state.transcriptSearchCursor + 1} av ${results.length}`;
+  state.selectedTranscriptionSegmentIndex = current.segmentIndex;
+  if (current.location) {
+    state.selectedTranscriptionSourceClipId = current.location.sourceClipId;
+    setPlayhead(current.location.time);
+  }
+  setTranscriptionEditorHighlight(current.segmentIndex);
+  elements.info.textContent = current.location
+    ? `Transkription · segment ${current.segmentIndex + 1} av ${state.transcriptionSegments.length}`
+    : `Transkription · segment ${current.segmentIndex + 1} · utanför tidslinjen`;
+  elements.transcriptSearchStatus.value = `${state.transcriptSearchCursor + 1} av ${results.length}${current.location ? '' : ' · utanför tidslinjen'}`;
 }
 
 function defaultBlurBox() {
@@ -2290,7 +3496,7 @@ function sourceCanvas() {
   return { width: visual.sourceWidth, height: visual.sourceHeight };
 }
 
-function contentBounds() {
+function contentBounds(clips = state.clips) {
   const canvas = state.canvas || sourceCanvas() || { width: 1600, height: 900 };
   const W = canvas.width;
   const H = canvas.height;
@@ -2298,7 +3504,7 @@ function contentBounds() {
   let minY = Infinity;
   let maxX = -Infinity;
   let maxY = -Infinity;
-  for (const clip of state.clips) {
+  for (const clip of clips) {
     if (clip.kind !== 'video' && clip.kind !== 'image') continue;
     if (!layerVisible(clip.trackIndex || 0)) continue;
     const sW = Number(clip.sourceWidth);
@@ -2341,7 +3547,7 @@ function contentBounds() {
   return { minX, minY, maxX, maxY };
 }
 
-function transformProjectToBounds(bounds) {
+function transformProjectToBounds(bounds, sourceClips = state.clips) {
   const canvas = state.canvas || sourceCanvas() || { width: 1600, height: 900 };
   if (!bounds) return null;
   const W = canvas.width;
@@ -2351,7 +3557,7 @@ function transformProjectToBounds(bounds) {
   if (newWidth >= W - 1 && newHeight >= H - 1) return null;
   const shiftX = bounds.minX;
   const shiftY = bounds.minY;
-  const clips = state.clips.map((clip) => {
+  const clips = sourceClips.map((clip) => {
     const c = { ...clip };
     if (clip.kind === 'video' || clip.kind === 'image') {
       if (Number.isFinite(c.posX)) c.posX = ((W - newWidth) / 2 + c.posX * W - shiftX) / newWidth;
@@ -2391,16 +3597,16 @@ function transformProjectToBounds(bounds) {
   return { canvas: { width: newWidth, height: newHeight }, clips, bounds };
 }
 
-function fitProjectToContent() {
+function fitProjectToContent(clips = state.clips) {
   const canvas = state.canvas || sourceCanvas() || { width: 1600, height: 900 };
-  const bounds = contentBounds();
+  const bounds = contentBounds(clips);
   if (!bounds) return null;
-  if (exportSubtitleCues()) {
+  if (exportSubtitleCues(clips)) {
     bounds.minX = 0;
     bounds.maxX = canvas.width;
     bounds.maxY = canvas.height;
   }
-  return transformProjectToBounds(bounds);
+  return transformProjectToBounds(bounds, clips);
 }
 
 function currentExportDims() {
@@ -2542,6 +3748,7 @@ function trackKinds(kind) {
 }
 
 function allocateTrack(kind, start, end, ignoreId = null) {
+  if (kind === 'audio') return timelineModel.firstFreeTrack(state.clips, ['audio'], start, end, ignoreId);
   if (VISUAL_KINDS.includes(kind)) return 0;
   return timelineModel.firstFreeTrack(state.clips, trackKinds(kind), start, end, ignoreId);
 }
@@ -2605,10 +3812,10 @@ function ensureAudioTrack(index) {
   return state.audioTrackEls[index];
 }
 
-function rebuildTrackLayout(liftedIds) {
+function rebuildTrackLayout(liftedIds, options = {}) {
   const selectedId = state.selectedId;
   const selectedIds = new Set(state.selectedIds);
-  state.clips = timelineModel.compactTrackAssignments(state.clips, liftedIds || []);
+  state.clips = timelineModel.compactTrackAssignments(state.clips, liftedIds || [], options.preserveTrackIndexes === true);
   clearDynamicTracks();
   elements.visualTrack.replaceChildren();
   elements.transcriptionTrack.replaceChildren();
@@ -2735,7 +3942,11 @@ function renderClip(clip) {
       canvas.style.height = '64px';
       element.insertBefore(canvas, element.firstChild);
     }
-    drawTimelineWaveform(canvas, clip);
+    const waveformKey = `${clip.mediaId}:${Number(clip.trimStart).toFixed(3)}:${Number(clip.trimEnd).toFixed(3)}:${canvas.width}x${canvas.height}`;
+    if (canvas.dataset.waveformKey !== waveformKey) {
+      canvas.dataset.waveformKey = waveformKey;
+      drawTimelineWaveform(canvas, clip);
+    }
   } else if (clip.kind === 'video') {
     let canvas = element.querySelector('.clip-thumbs');
     const displayWidth = Math.max(8, Math.round(secondsToPixels(clipDuration(clip)))) || 8;
@@ -2751,7 +3962,15 @@ function renderClip(clip) {
       canvas.style.height = '60px';
       element.insertBefore(canvas, element.firstChild);
     }
-    drawTimelineThumbnails(canvas, clip);
+    const thumbnailKey = `${clip.mediaId}:${Number(clip.trimStart).toFixed(3)}:${Number(clip.trimEnd).toFixed(3)}:${canvas.width}x${canvas.height}`;
+    if (!clipNearTimelineViewport(element)) {
+      canvas.dataset.thumbnailDeferred = '1';
+      canvas.dataset.thumbnailKey = '';
+    } else if (canvas.dataset.thumbnailKey !== thumbnailKey) {
+      delete canvas.dataset.thumbnailDeferred;
+      canvas.dataset.thumbnailKey = thumbnailKey;
+      drawTimelineThumbnails(canvas, clip);
+    }
   }
 }
 
@@ -2828,7 +4047,36 @@ function describeClip(clip) {
   return `${clip.name} · start ${formatTime(clip.start)} · källa ${formatTime(clip.trimStart)}–${formatTime(clip.trimEnd)}`;
 }
 
+function transcriptionSourceForSelectedClip(clip) {
+  if (!clip || !state.transcriptionMediaId || state.transcriptionSegments.length === 0) return null;
+  if ((clip.kind === 'video' || clip.kind === 'audio') && clip.mediaId === state.transcriptionMediaId) return clip;
+  if (!clip.linkGroupId) return null;
+  return state.clips.find((candidate) =>
+    candidate.linkGroupId === clip.linkGroupId &&
+    (candidate.kind === 'video' || candidate.kind === 'audio') &&
+    candidate.mediaId === state.transcriptionMediaId
+  ) || null;
+}
+
+function transcriptionSegmentForSourceClip(clip) {
+  if (!clip) return -1;
+  const playheadInClip = state.playhead >= clip.start && state.playhead < clip.start + clipDuration(clip);
+  const sourceTime = playheadInClip ? clip.trimStart + state.playhead - clip.start : clip.trimStart;
+  const activeIndex = state.transcriptionSegments.findIndex((segment) =>
+    sourceTime >= Number(segment.start) && sourceTime < Number(segment.end)
+  );
+  if (activeIndex >= 0) return activeIndex;
+  const overlappingIndex = state.transcriptionSegments.findIndex((segment) =>
+    Number(segment.end) > clip.trimStart && Number(segment.start) < clip.trimEnd
+  );
+  return overlappingIndex >= 0 ? overlappingIndex : 0;
+}
+
 function selectClips(ids, primaryId = null, options = {}) {
+  if (!options.preserveTranscriptionSelection) {
+    state.selectedTranscriptionSegmentIndex = -1;
+    state.selectedTranscriptionSourceClipId = null;
+  }
   const validIds = new Set(ids.filter((id) => state.clips.some((clip) => clip.id === id)));
   const nextPrimaryId = primaryId && validIds.has(primaryId) ? primaryId : validIds.values().next().value || null;
   const selectionChanged = state.selectedId !== nextPrimaryId;
@@ -2839,9 +4087,17 @@ function selectClips(ids, primaryId = null, options = {}) {
   });
   const hasSelection = validIds.size > 0;
   elements.remove.disabled = !hasSelection;
+  updateExportSelectionButton();
   const qtRemove = document.querySelector('#qt-remove');
   if (qtRemove) qtRemove.disabled = !hasSelection;
   const clip = state.clips.find((item) => item.id === nextPrimaryId);
+  if (!options.preserveTranscriptionSelection && validIds.size === 1) {
+    const transcriptionSource = transcriptionSourceForSelectedClip(clip);
+    if (transcriptionSource) {
+      state.selectedTranscriptionSourceClipId = transcriptionSource.id;
+      state.selectedTranscriptionSegmentIndex = transcriptionSegmentForSourceClip(transcriptionSource);
+    }
+  }
   if (!options.preventPlayheadJump && !editorHistory.restoring && selectionChanged &&
       (clip?.kind === 'blur' || clip?.kind === 'color' || clip?.kind === 'html') &&
       (state.playhead < clip.start || state.playhead >= clip.start + clipDuration(clip))) {
@@ -2850,11 +4106,15 @@ function selectClips(ids, primaryId = null, options = {}) {
   elements.info.textContent = validIds.size > 1
     ? `${validIds.size} klipp markerade · ${describeClip(clip)}`
     : describeClip(clip);
+  if (options.preserveTranscriptionSelection && state.selectedTranscriptionSegmentIndex >= 0) {
+    elements.info.textContent = `Transkription · segment ${state.selectedTranscriptionSegmentIndex + 1} av ${state.transcriptionSegments.length}`;
+  }
   if (clip && clip.kind !== 'video' && clip.kind !== 'image') {
     state.cropActive = false;
     hideCropOverlay();
   }
   updateCropTools(clip);
+  updateImageSizeTools(clip);
   if (state.cropActive && clip && (clip.kind === 'video' || clip.kind === 'image')) showCropOverlay();
   else if (state.cropActive) hideCropOverlay();
   updateBlurTools(clip);
@@ -2863,15 +4123,31 @@ function selectClips(ids, primaryId = null, options = {}) {
   updateShapeTools(clip);
   updateTextTools(clip);
   updateHtmlTools(clip);
-  updateAudioTools(clip);
+  updateTranscriptionTools();
+  updateTransitionTools();
   updateLinkTool();
-  const anyTools = clip && (clip.kind === 'video' || clip.kind === 'image' || clip.kind === 'blur' || clip.kind === 'color' || clip.kind === 'text' || clip.kind === 'html' || clip.kind === 'audio');
+  const transcriptionSelected = state.selectedTranscriptionSegmentIndex >= 0 && !elements.transcriptionTools.hidden;
+  const anyTools = transcriptionSelected || (clip && (clip.kind === 'video' || clip.kind === 'image' || clip.kind === 'blur' || clip.kind === 'color' || clip.kind === 'text' || clip.kind === 'html' || clip.kind === 'audio'));
   elements.toolsPanel.hidden = !anyTools;
+  if (elements.toolsPanelResizer) elements.toolsPanelResizer.hidden = !anyTools;
   if (options.refreshPreview !== false) setPlayhead(state.playhead);
 }
 
 function selectClip(id) {
   selectClips(id ? [id] : [], id);
+}
+
+function updateTransitionTools() {
+  const selected = state.clips.filter((clip) => state.selectedIds.has(clip.id));
+  const canAddTransition = selected.length === 2 &&
+    selected.every((clip) => clip.kind === 'video' || clip.kind === 'image');
+  const title = canAddTransition
+    ? 'Lägg till övergång mellan markerade klipp'
+    : 'Markera exakt två video- eller bildklipp';
+  for (const button of [elements.addTransition, elements.quickTransition]) {
+    button.disabled = !canAddTransition;
+    button.title = title;
+  }
 }
 
 function selectedVideoAudioPair() {
@@ -2922,6 +4198,68 @@ function toggleSelectedLink() {
 function updateCropTools(clip) {
   elements.cropTools.hidden = !(clip && (clip.kind === 'video' || clip.kind === 'image') && state.cropActive);
   requestAnimationFrame(updatePreviewWindowSize);
+}
+
+function imageSizeMetrics(clip) {
+  if (!clip || clip.kind !== 'image') return null;
+  const sourceWidth = Number(clip.sourceWidth);
+  const sourceHeight = Number(clip.sourceHeight);
+  if (!(sourceWidth > 0) || !(sourceHeight > 0)) return null;
+  const canvas = state.canvas || { width: sourceWidth, height: sourceHeight };
+  const canvasWidth = Number(canvas.width);
+  const canvasHeight = Number(canvas.height);
+  if (!(canvasWidth > 0) || !(canvasHeight > 0)) return null;
+  const crop = clip.crop || { left: 0, right: 0, top: 0, bottom: 0 };
+  const cropWidth = sourceWidth * (1 - crop.left - crop.right);
+  const cropHeight = sourceHeight * (1 - crop.top - crop.bottom);
+  if (!(cropWidth > 0) || !(cropHeight > 0)) return null;
+  const containScale = Math.min(canvasWidth / cropWidth, canvasHeight / cropHeight);
+  const baseWidth = cropWidth * containScale;
+  const baseHeight = cropHeight * containScale;
+  const scale = clamp(Number(clip.visualScale) || 1, 0.1, 4);
+  return { baseWidth, baseHeight, width: baseWidth * scale, height: baseHeight * scale };
+}
+
+function syncImageSizeInputs(clip, force = false) {
+  const metrics = imageSizeMetrics(clip);
+  if (!metrics) return;
+  if (force || document.activeElement !== elements.imageWidth) {
+    elements.imageWidth.value = String(Math.max(1, Math.round(metrics.width)));
+  }
+  if (force || document.activeElement !== elements.imageHeight) {
+    elements.imageHeight.value = String(Math.max(1, Math.round(metrics.height)));
+  }
+}
+
+function updateImageSizeTools(clip) {
+  const visible = Boolean(clip && clip.kind === 'image' && state.selectedIds.size === 1);
+  elements.imageSizeTools.hidden = !visible;
+  if (visible) syncImageSizeInputs(clip, true);
+}
+
+function setSelectedImageSize(dimension, rawValue) {
+  const clip = state.clips.find((item) => item.id === state.selectedId && item.kind === 'image');
+  const metrics = imageSizeMetrics(clip);
+  const targetPixels = Number(rawValue);
+  if (!clip || !metrics || !Number.isFinite(targetPixels) || targetPixels <= 0) {
+    if (clip) syncImageSizeInputs(clip, true);
+    return false;
+  }
+  const basePixels = dimension === 'height' ? metrics.baseHeight : metrics.baseWidth;
+  const nextScale = clamp(targetPixels / basePixels, 0.1, 4);
+  if (Math.abs(nextScale - (Number(clip.visualScale) || 1)) < 0.000001) {
+    syncImageSizeInputs(clip, true);
+    return false;
+  }
+  recordHistory();
+  clip.visualScale = Math.round(nextScale * 1000000) / 1000000;
+  refreshPreviewLayout();
+  syncImageSizeInputs(clip, true);
+  const updated = imageSizeMetrics(clip);
+  elements.info.textContent = `${describeClip(clip)} · ${Math.round(updated.width)}×${Math.round(updated.height)} px`;
+  persist();
+  updateAutoFitLabel();
+  return true;
 }
 
 function resetSelectedCrop() {
@@ -3204,6 +4542,15 @@ function normalizeRestoredClip(clip) {
     if (!Number.isFinite(clip.posY)) clip.posY = 0;
     if (clip.circular && !Number.isFinite(clip.circular.size)) clip.circular.size = 0.5;
     if (!clip.circular) clip.circular = null;
+    for (const key of ['animIn', 'animOut']) {
+      if (!clip[key] || typeof clip[key] !== 'object') {
+        clip[key] = null;
+      } else if (!['fade', 'scale', 'slide-up', 'slide-down', 'slide-left', 'slide-right'].includes(clip[key].type)) {
+        clip[key] = null;
+      } else {
+        clip[key] = { type: clip[key].type, duration: clamp(Number(clip[key].duration) || 0.5, 0.1, 3) };
+      }
+    }
   }
   return clip;
 }
@@ -3275,6 +4622,8 @@ function updateAnimTools(clip) {
   if (canAnim) {
     const anim = clip.animIn || { type: 'none', duration: 0.5 };
     elements.animBtns.forEach((btn) => btn.classList.toggle('active', btn.dataset.anim === anim.type));
+    const animOut = clip.animOut || { type: 'none' };
+    elements.animOutBtns.forEach((btn) => btn.classList.toggle('active', btn.dataset.animOut === animOut.type));
     elements.animDuration.value = String(anim.duration);
     elements.animDurationValue.textContent = `${anim.duration.toFixed(1)} s`;
   }
@@ -3295,19 +4644,35 @@ function handleAnimClick(event) {
   persist();
 }
 
+function handleAnimOutClick(event) {
+  const clip = state.clips.find((item) => item.id === state.selectedId);
+  if (!clip || (clip.kind !== 'video' && clip.kind !== 'image')) return;
+  const type = event.currentTarget.dataset.animOut;
+  recordHistory();
+  if (type === 'none') delete clip.animOut;
+  else clip.animOut = { type, duration: Number(elements.animDuration.value) };
+  updateAnimTools(clip);
+  setPlayhead(state.playhead);
+  persist();
+}
+
 function handleAnimDuration() {
   const clip = state.clips.find((item) => item.id === state.selectedId);
-  if (!clip || (clip.kind !== 'video' && clip.kind !== 'image') || !clip.animIn) return;
-  clip.animIn.duration = clamp(Number(elements.animDuration.value), 0.1, 3);
+  if (!clip || (clip.kind !== 'video' && clip.kind !== 'image') || (!clip.animIn && !clip.animOut)) return;
+  const duration = clamp(Number(elements.animDuration.value), 0.1, 3);
+  if (clip.animIn) clip.animIn.duration = duration;
+  if (clip.animOut) clip.animOut.duration = duration;
   elements.animDurationValue.textContent = `${clip.animIn.duration.toFixed(1)} s`;
   persist();
 }
 
 elements.animBtns = [...document.querySelectorAll('.anim-btn')];
+elements.animOutBtns = [...document.querySelectorAll('[data-anim-out]')];
 elements.animDuration = document.getElementById('anim-duration');
 elements.animDurationValue = document.getElementById('anim-dur-value');
 elements.animTools = document.getElementById('anim-tools');
 elements.animBtns.forEach((btn) => btn.addEventListener('click', handleAnimClick));
+elements.animOutBtns.forEach((btn) => btn.addEventListener('click', handleAnimOutClick));
 elements.animDuration.addEventListener('input', handleAnimDuration);
 
 elements.shapeTools = document.getElementById('shape-tools');
@@ -3658,95 +5023,6 @@ function centerSelectedText() {
   renderTextOverlays(state.playhead);
 }
 
-function updateAudioTools(clip) {
-  const canAudio = clip?.kind === 'audio';
-  elements.audioTools.hidden = !canAudio;
-  if (!canAudio) return;
-  elements.noisePrintStatus.textContent = 'Ingen brusprofil fångad';
-  elements.noisePrintStatus.className = 'noise-print-status';
-  state.noiseProfileId = null;
-  elements.applyNoiseReduction.disabled = true;
-  const duration = clipDuration(clip);
-  elements.noisePrintStart.value = Math.max(0, Math.min(clip.playheadOffset || 0, duration - 0.3)).toFixed(1);
-  elements.noisePrintLength.value = Math.min(0.5, duration).toFixed(1);
-  renderWaveform(clip);
-}
-
-function renderWaveform(clip) {
-  const canvas = elements.audioWaveform;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-  const w = canvas.width;
-  const h = canvas.height;
-  if (!clip.mediaId) {
-    ctx.clearRect(0, 0, w, h);
-    ctx.fillStyle = '#3a6a4a';
-    ctx.font = '12px system-ui';
-    ctx.textAlign = 'center';
-    ctx.fillText('Ingen ljuddata', w / 2, h / 2);
-    return;
-  }
-  ctx.fillStyle = '#1a3a22';
-  ctx.fillRect(0, 0, w, h);
-  const entry = getWaveformData(clip.mediaId, clip.trimStart, clip.trimEnd, w);
-  if (!entry) { ctx.fillText('Fel', w / 2, h / 2); return; }
-  if (entry.loading) {
-    ctx.fillStyle = '#3a6a4a';
-    ctx.font = '12px system-ui';
-    ctx.textAlign = 'center';
-    ctx.fillText('Laddar vågform…', w / 2, h / 2);
-    const redraw = () => renderWaveform(clip);
-    if (!entry.callbacks.includes(redraw)) entry.callbacks.push(redraw);
-    return;
-  }
-  if (!entry.peaks) {
-    ctx.fillStyle = '#3a6a4a';
-    ctx.font = '12px system-ui';
-    ctx.textAlign = 'center';
-    ctx.fillText('Kunde inte ladda vågform', w / 2, h / 2);
-    return;
-  }
-  if (entry.peaks.length === 0) {
-    ctx.fillText('Ingen data', w / 2, h / 2);
-    return;
-  }
-  ctx.fillStyle = '#1a3a22';
-  ctx.fillRect(0, 0, w, h);
-  drawWaveformPeaks(ctx, w, h, entry.peaks);
-  const duration = clipDuration(clip);
-  const selStart = Math.max(0, Math.min(Number(elements.noisePrintStart.value) || 0, duration));
-  const selLen = Math.max(0, Math.min(Number(elements.noisePrintLength.value) || 0, duration - selStart));
-  const selEnd = selStart + selLen;
-  const selStartX = (selStart / duration) * w;
-  const selEndX = (selEnd / duration) * w;
-  if (selLen > 0 && selStartX < selEndX) {
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
-    if (selStartX > 0) ctx.fillRect(0, 0, selStartX, h);
-    if (selEndX < w) ctx.fillRect(selEndX, 0, w - selEndX, h);
-    ctx.fillStyle = 'rgba(74, 222, 128, 0.08)';
-    ctx.fillRect(selStartX, 0, selEndX - selStartX, h);
-    ctx.strokeStyle = 'rgba(74, 222, 128, 0.6)';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([3, 3]);
-    ctx.beginPath();
-    ctx.moveTo(selStartX, 0); ctx.lineTo(selStartX, h);
-    ctx.moveTo(selEndX, 0); ctx.lineTo(selEndX, h);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.fillStyle = '#4ade80';
-    ctx.font = '9px system-ui';
-    ctx.textAlign = 'center';
-    ctx.fillText(formatTime(clip.trimStart + selStart), selStartX, 10);
-    ctx.fillText(formatTime(clip.trimStart + selEnd), selEndX, 10);
-  }
-  ctx.fillStyle = '#3a6a4a';
-  ctx.font = '10px system-ui';
-  ctx.textAlign = 'left';
-  ctx.fillText(`${formatTime(clip.trimStart || 0)}`, 4, h - 4);
-  ctx.textAlign = 'right';
-  ctx.fillText(`${formatTime(clip.trimEnd || clip.trimStart + duration)}`, w - 4, h - 4);
-}
-
 const waveformFetchQueue = [];
 let activeWaveformFetches = 0;
 const MAX_CONCURRENT_WAVEFORM_FETCHES = 2;
@@ -3843,9 +5119,11 @@ function drawTimelineWaveform(canvas, clip) {
       entry.callbacks.push(redraw);
     }
     setClipWaveformLoading(clip.id, true);
+    setClipLoadingState(clip.id, 'waveform', true);
     return;
   }
   setClipWaveformLoading(clip.id, false);
+  setClipLoadingState(clip.id, 'waveform', false);
   if (!entry.peaks) {
     ctx.fillStyle = '#1a1515';
     ctx.fillRect(0, 0, w, h);
@@ -3881,6 +5159,7 @@ function drawTimelineThumbnails(canvas, clip) {
     image = new Image();
     image.decoding = 'async';
     image.onload = () => {
+      setClipLoadingState(clip.id, 'thumbnail', false);
       if (!thumbnailImageCache.has(key)) thumbnailImageCache.set(key, image);
       const elapsed = Math.round(performance.now() - startedAt);
       logProcess(`Previewbilder ${clip.name || clip.mediaId} · ${count} st · ${elapsed} ms`, 'ok');
@@ -3891,6 +5170,7 @@ function drawTimelineThumbnails(canvas, clip) {
       }
     };
     image.onerror = () => {
+      setClipLoadingState(clip.id, 'thumbnail', false, true);
       logProcess(`Previewbilder misslyckades: ${clip.name || clip.mediaId}`, 'error');
       ctx.fillStyle = '#1a1515';
       ctx.fillRect(0, 0, w, h);
@@ -3900,6 +5180,7 @@ function drawTimelineThumbnails(canvas, clip) {
       ctx.fillText('✕', w / 2, h / 2 + 3);
     };
     image.src = `/api/media/${encodeURIComponent(clip.mediaId)}/thumbs?width=${frameWidth}&count=${count}&start=${clipStart.toFixed(3)}&end=${clipEnd.toFixed(3)}`;
+    setClipLoadingState(clip.id, 'thumbnail', true);
     thumbnailImageCache.set(key, image);
     return;
   }
@@ -3933,118 +5214,6 @@ function drawThumbSprite(ctx, w, h, image, count) {
       i * frameW, 0, frameW, frameH,
       offsetX + i * boxW + dx, dy, drawW, drawH
     );
-  }
-}
-
-async function captureNoisePrint() {
-  const clip = state.clips.find((item) => item.id === state.selectedId);
-  if (!clip || clip.kind !== 'audio') return;
-  const startOffset = Number(elements.noisePrintStart.value) || 0;
-  const length = Number(elements.noisePrintLength.value) || 0.3;
-  const clipLen = clipDuration(clip);
-  if (startOffset + length > clipLen) {
-    elements.noisePrintStatus.textContent = 'Intervallet sträcker sig utanför klippet.';
-    elements.noisePrintStatus.className = 'noise-print-status error';
-    return;
-  }
-  const startTime = clip.trimStart + startOffset;
-  const endTime = startTime + length;
-  elements.captureNoisePrint.disabled = true;
-  elements.captureNoisePrint.textContent = 'Fångar…';
-  elements.noisePrintStatus.textContent = 'Analyserar brusprofil…';
-  elements.noisePrintStatus.className = 'noise-print-status';
-  try {
-    const result = await api(`/api/media/${encodeURIComponent(clip.mediaId)}/noise-print`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ startTime, endTime })
-    });
-    state.noiseProfileId = result.id;
-    state.noiseProfileMediaId = clip.mediaId;
-    elements.noisePrintStatus.textContent = `Brusprofil fångad (${result.sampleDuration.toFixed(2)} s)`;
-    elements.noisePrintStatus.className = 'noise-print-status captured';
-    elements.applyNoiseReduction.disabled = false;
-  } catch (error) {
-    elements.noisePrintStatus.textContent = `Misslyckades: ${error.message}`;
-    elements.noisePrintStatus.className = 'noise-print-status error';
-  } finally {
-    elements.captureNoisePrint.disabled = false;
-    elements.captureNoisePrint.textContent = 'Fånga brusprofil';
-  }
-}
-
-async function applyNoiseReduction() {
-  const clip = state.clips.find((item) => item.id === state.selectedId);
-  if (!clip || clip.kind !== 'audio' || !state.noiseProfileId) return;
-  const amount = Number(elements.nrAmount.value) / 100;
-  elements.applyNoiseReduction.disabled = true;
-  elements.applyNoiseReduction.textContent = 'Bearbetar…';
-  try {
-    const newMedia = await api(`/api/media/${encodeURIComponent(clip.mediaId)}/reduce-noise`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ noiseProfileId: state.noiseProfileId, amount })
-    });
-    const newClip = {
-      ...clip,
-      id: crypto.randomUUID(),
-      mediaId: newMedia.id,
-      mediaDuration: newMedia.duration,
-      name: newMedia.name,
-      start: clip.start,
-      trimStart: 0,
-      trimEnd: newMedia.duration
-    };
-    state.clips.push(newClip);
-    createClipElement(newClip);
-    selectClip(newClip.id);
-    persist();
-    elements.noisePrintStatus.textContent = 'Brusreducering applicerad!';
-  } catch (error) {
-    elements.noisePrintStatus.textContent = `Misslyckades: ${error.message}`;
-    elements.noisePrintStatus.className = 'noise-print-status error';
-  } finally {
-    elements.applyNoiseReduction.disabled = false;
-    elements.applyNoiseReduction.textContent = 'Applicera brusreducering';
-  }
-}
-
-async function applyNoiseGate() {
-  const clip = state.clips.find((item) => item.id === state.selectedId);
-  if (!clip || clip.kind !== 'audio') return;
-  const threshold = Number(elements.gateThreshold.value) / 100;
-  const attack = Number(elements.gateAttack.value);
-  const release = Number(elements.gateRelease.value);
-  elements.applyNoiseGate.disabled = true;
-  elements.applyNoiseGate.textContent = 'Bearbetar…';
-  try {
-    const newMedia = await api(`/api/media/${encodeURIComponent(clip.mediaId)}/noise-gate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ threshold, attack, release })
-    });
-    const newClip = {
-      ...clip,
-      id: crypto.randomUUID(),
-      mediaId: newMedia.id,
-      mediaDuration: newMedia.duration,
-      name: newMedia.name,
-      start: clip.start,
-      trimStart: 0,
-      trimEnd: newMedia.duration
-    };
-    state.clips.push(newClip);
-    createClipElement(newClip);
-    selectClip(newClip.id);
-    persist();
-    elements.noisePrintStatus.textContent = 'Noise Gate applicerad!';
-    elements.noisePrintStatus.className = 'noise-print-status captured';
-  } catch (error) {
-    elements.noisePrintStatus.textContent = `Misslyckades: ${error.message}`;
-    elements.noisePrintStatus.className = 'noise-print-status error';
-  } finally {
-    elements.applyNoiseGate.disabled = false;
-    elements.applyNoiseGate.textContent = 'Applicera Noise Gate';
   }
 }
 
@@ -4783,6 +5952,7 @@ function applyVisualLayout(clip, mediaElement) {
   }
   applyTransitionPreview(clip, mediaElement, state.playhead);
   updateVisualScaleOverlay(clip, { left: visibleLeft + offsetX, top: visibleTop + offsetY, width: visibleWidth, height: visibleHeight });
+  if (clip.kind === 'image' && clip.id === state.selectedId) syncImageSizeInputs(clip);
   mediaElement.dataset.clipId = clip.id;
 }
 
@@ -4805,17 +5975,22 @@ function startVisualScaleDrag(event) {
     item.id === state.selectedId && (item.kind === 'video' || item.kind === 'image')
   );
   if (!clip) return;
-  const frame = elements.previewWindow.getBoundingClientRect();
-  const centerX = frame.left + frame.width / 2;
-  const centerY = frame.top + frame.height / 2;
-  const initialDistance = Math.hypot(event.clientX - centerX, event.clientY - centerY);
-  if (initialDistance < 1) return;
+  const bounds = elements.visualScaleOverlay.getBoundingClientRect();
+  const centerX = bounds.left + bounds.width / 2;
+  const centerY = bounds.top + bounds.height / 2;
+  const corner = event.currentTarget.dataset.corner || 'se';
+  const cornerX = corner.includes('e') ? 1 : -1;
+  const cornerY = corner.includes('s') ? 1 : -1;
+  const initialProjection = (event.clientX - centerX) * cornerX + (event.clientY - centerY) * cornerY;
+  if (initialProjection < 0.5) return;
   state.visualScaleDrag = {
     clip,
     pointerId: event.pointerId,
     centerX,
     centerY,
-    initialDistance,
+    cornerX,
+    cornerY,
+    initialProjection: Math.max(1, initialProjection),
     initialScale: clamp(Number(clip.visualScale) || 1, 0.1, 4),
     snapshot: editorSnapshot(),
     historyRecorded: false
@@ -4828,8 +6003,8 @@ function startVisualScaleDrag(event) {
 function moveVisualScaleDrag(event) {
   const drag = state.visualScaleDrag;
   if (!drag || drag.pointerId !== event.pointerId) return;
-  const distance = Math.hypot(event.clientX - drag.centerX, event.clientY - drag.centerY);
-  const nextScale = clamp(drag.initialScale * distance / drag.initialDistance, 0.1, 4);
+  const projection = Math.max(1, (event.clientX - drag.centerX) * drag.cornerX + (event.clientY - drag.centerY) * drag.cornerY);
+  const nextScale = clamp(drag.initialScale * projection / drag.initialProjection, 0.1, 4);
   if (Math.abs(nextScale - (drag.clip.visualScale || 1)) < 0.001) return;
   if (!drag.historyRecorded) {
     pushHistorySnapshot(drag.snapshot);
@@ -4916,6 +6091,13 @@ function applyTransitionPreview(clip, mediaElement, time) {
     if (anim.type === 'scale') transform = `scale(${progress})`;
     if (anim.type === 'slide-up') transform = `translateY(${(1 - progress) * 100}%)`;
   }
+  const animOut = clip.animOut;
+  const clipEnd = clip.start + clipDuration(clip);
+  if (animOut?.type === 'fade' && time >= clipEnd - animOut.duration && time < clipEnd) {
+    const progress = clamp((time - (clipEnd - animOut.duration)) / animOut.duration, 0, 1);
+    const outOpacity = 1 - progress;
+    opacity = opacity === '' ? String(outOpacity) : String(Math.min(Number(opacity), outOpacity));
+  }
   if (mediaElement.style.opacity !== opacity) mediaElement.style.opacity = opacity;
   if (mediaElement.style.transform !== transform) mediaElement.style.transform = transform;
 }
@@ -4982,7 +6164,8 @@ function layerMediaElement(clip, isTop) {
   if (element) return element;
   element = document.createElement(clip.kind === 'video' ? 'video' : 'img');
   element.className = `layer-media ${clip.kind === 'video' ? 'layer-video' : 'layer-image'}`;
-  element.preload = 'auto';
+  element.preload = 'metadata';
+  if (clip.kind === 'video') element.playsInline = true;
   element.muted = true;
   element.hidden = true;
   elements.previewWindow.appendChild(element);
@@ -5014,12 +6197,71 @@ function seekVideoElement(element, time) {
   try { element.currentTime = time; } catch (_error) { /* metadata saknas */ }
 }
 
+function playMediaElementWhenReady(element) {
+  if (!state.playing || !element) return;
+  if (!element.paused && !element.ended) return;
+  if (element.ended) element.pause();
+  const attempt = () => {
+    if (!state.playing || !element.paused) {
+      element._playbackRetryPending = false;
+      return;
+    }
+    const result = element.play();
+    if (result?.catch) {
+      result.catch(() => {
+        if (!state.playing || element._playbackRetryPending) return;
+        element._playbackRetryPending = true;
+        const retry = () => {
+          if (!element._playbackRetryPending) return;
+          element._playbackRetryPending = false;
+          attempt();
+        };
+        element.addEventListener('canplay', retry, { once: true });
+        element.addEventListener('loadeddata', retry, { once: true });
+        window.setTimeout(retry, 120);
+      });
+    }
+  };
+  attempt();
+}
+
+function setPreviewMediaStatus(message, type = '') {
+  const status = elements.previewMediaStatus;
+  if (!status) return;
+  status.textContent = message;
+  status.className = `preview-media-status${type ? ` ${type}` : ''}`;
+  status.hidden = !message;
+}
+
+function watchPreviewMediaReadiness(element, clip, isTop) {
+  if (!isTop) return;
+  const key = `${clip.id}:${clip.mediaId}`;
+  if (element.dataset.loadingKey === key) return;
+  element.dataset.loadingKey = key;
+  const label = clip.kind === 'audio' ? 'ljud' : clip.kind === 'image' ? 'bild' : 'video';
+  setPreviewMediaStatus(`Laddar ${label}…`);
+  const ready = () => {
+    if (element.dataset.loadingKey !== key) return;
+    setClipLoadingState(clip.id, 'media', false);
+    setPreviewMediaStatus('Klar', 'ok');
+  };
+  const failed = () => {
+    if (element.dataset.loadingKey !== key) return;
+    setClipLoadingState(clip.id, 'media', false, true);
+    setPreviewMediaStatus(`Kunde inte ladda ${label}.`, 'error');
+  };
+  element.addEventListener(clip.kind === 'image' ? 'load' : 'canplay', ready, { once: true });
+  element.addEventListener('error', failed, { once: true });
+  if ((clip.kind === 'image' && element.complete) || (clip.kind !== 'image' && element.readyState >= 3)) ready();
+}
+
 function renderLayerMedia(time, playing = false) {
   const layers = activeVisualLayers(time);
   if (!state.playing && !elements.preview.paused) elements.preview.pause();
   elements.preview.hidden = true;
   elements.imagePreview.hidden = true;
   if (!layers.length) {
+    setPreviewMediaStatus('');
     for (const element of state.previewLayers.values()) {
       element.hidden = true;
       if (element.pause && !element.paused) element.pause();
@@ -5042,29 +6284,48 @@ function renderLayerMedia(time, playing = false) {
     const isTop = clip === top;
     const element = layerMediaElement(clip, isTop);
     const url = `/api/media/${encodeURIComponent(clip.mediaId)}/file`;
+    element.dataset.clipId = clip.id;
     if (element.dataset.mediaId !== clip.mediaId) {
+      element.pause?.();
+      element._playbackRetryPending = false;
+      try { element.currentTime = 0; } catch (_error) { /* källan återställs vid load */ }
       element.src = url;
       element.dataset.mediaId = clip.mediaId;
+      setClipLoadingState(clip.id, 'media', true);
+      // Explicitly restart the media pipeline when reusing the preview
+      // element. Without load(), Chromium can keep the previous decoded
+      // frame after an image→video or video→video boundary.
+      if (!/jsdom/i.test(navigator.userAgent || '') && typeof element.load === 'function') element.load();
     }
+    watchPreviewMediaReadiness(element, clip, isTop);
     const zIndex = String(Math.max(0, (clip.trackIndex || 0) * 10));
     if (element.style.zIndex !== zIndex) element.style.zIndex = zIndex;
     element.hidden = false;
+    if (clip.kind === 'video') element.preload = state.playing && isTop ? 'auto' : 'metadata';
     applyVisualLayout(clip, element);
     if (clip.kind === 'image') continue;
     const sourceTime = clip.trimStart + time - clip.start;
     const muted = isTop ? !!clip.muted : true;
     if (element.muted !== muted) element.muted = muted;
     const targetTime = clamp(sourceTime, 0, clip.mediaDuration);
+    const seekCurrentClip = () => {
+      if (element.dataset.clipId === clip.id && element.dataset.mediaId === clip.mediaId) {
+        seekVideoElement(element, targetTime);
+        if (state.playing && playing) playMediaElementWhenReady(element);
+      }
+    };
     if (state.playing && playing) {
       if (element.readyState >= 1) {
-        if (Math.abs((element.currentTime || 0) - targetTime) > 0.15) seekVideoElement(element, targetTime);
+        if (Math.abs((element.currentTime || 0) - targetTime) > 0.15) seekCurrentClip();
       } else {
-        element.addEventListener('loadedmetadata', () => seekVideoElement(element, targetTime), { once: true });
+        element.addEventListener('loadedmetadata', seekCurrentClip, { once: true });
+        element.addEventListener('canplay', seekCurrentClip, { once: true });
+        element.addEventListener('loadeddata', () => playMediaElementWhenReady(element), { once: true });
       }
-      if (element.paused) element.play().catch(() => {});
+      playMediaElementWhenReady(element);
     } else {
-      if (element.readyState >= 1) seekVideoElement(element, targetTime);
-      else element.addEventListener('loadedmetadata', () => seekVideoElement(element, targetTime), { once: true });
+      if (element.readyState >= 1) seekCurrentClip();
+      else element.addEventListener('loadedmetadata', seekCurrentClip, { once: true });
     }
   }
 }
@@ -5120,6 +6381,62 @@ function clearVisualPreview() {
     element.remove();
   }
   state.previewLayers.clear();
+  for (const element of state.mediaPreloaders.values()) element.src = '';
+  state.mediaPreloaders.clear();
+  updatePreloadStatus();
+}
+
+function preloadUpcomingMedia(time) {
+  const now = performance.now();
+  if (now - state.lastMediaPreloadAt < 250) return;
+  state.lastMediaPreloadAt = now;
+  const upcoming = state.clips
+    .filter((clip) => ['video', 'audio', 'image'].includes(clip.kind) && clip.start > time && clip.start - time <= 4)
+    .sort((a, b) => a.start - b.start)
+    .slice(0, 6);
+  const wanted = new Set(upcoming.map((clip) => clip.mediaId));
+  for (const [mediaId, element] of state.mediaPreloaders) {
+    if (!wanted.has(mediaId)) {
+      element.src = '';
+      state.mediaPreloaders.delete(mediaId);
+    }
+  }
+  for (const clip of upcoming) {
+    if (state.mediaPreloaders.has(clip.mediaId)) continue;
+    const element = document.createElement(clip.kind === 'image' ? 'img' : clip.kind);
+    element.preload = 'auto';
+    if (clip.kind !== 'image') element.muted = true;
+    element.dataset.preloadState = 'loading';
+    const update = () => {
+      element.dataset.preloadState = clip.kind === 'image' || element.readyState >= 3 ? 'ready' : 'loading';
+      updatePreloadStatus();
+    };
+    element.addEventListener(clip.kind === 'image' ? 'load' : 'canplaythrough', update, { once: true });
+    element.addEventListener('error', () => {
+      element.dataset.preloadState = 'error';
+      updatePreloadStatus();
+    }, { once: true });
+    element.src = `/api/media/${encodeURIComponent(clip.mediaId)}/file`;
+    state.mediaPreloaders.set(clip.mediaId, element);
+  }
+  updatePreloadStatus();
+}
+
+function updatePreloadStatus() {
+  const status = elements.previewPreloadStatus;
+  if (!status) return;
+  const elementsToLoad = [...state.mediaPreloaders.values()];
+  if (!elementsToLoad.length) {
+    status.hidden = true;
+    return;
+  }
+  const ready = elementsToLoad.filter((element) => element.dataset.preloadState === 'ready').length;
+  const errors = elementsToLoad.filter((element) => element.dataset.preloadState === 'error').length;
+  const percent = Math.round((ready / elementsToLoad.length) * 100);
+  status.textContent = errors
+    ? `Förladdning ${percent}% · ${errors} kunde inte laddas`
+    : `Förladdar nästa media ${percent}% (${ready}/${elementsToLoad.length})`;
+  status.hidden = ready === elementsToLoad.length && errors === 0;
 }
 
 function projectEnd() {
@@ -5132,6 +6449,9 @@ function timelineAudioPlayer(clip) {
   player = document.createElement('audio');
   player.className = 'timeline-audio-player';
   player.preload = 'auto';
+  player.defaultMuted = false;
+  player.muted = false;
+  player.volume = 1;
   player.hidden = true;
   player.dataset.clipId = clip.id;
   elements.previewWindow.appendChild(player);
@@ -5158,6 +6478,7 @@ function togglePlayback() {
   if (end <= 0) return alert('Ladda upp minst ett klipp först.');
   if (state.playhead >= end - 0.01) setPlayhead(0);
   state.playing = true;
+  state.playbackEnd = end;
   state.playbackOrigin = state.playhead;
   state.playbackStartedAt = performance.now();
   elements.togglePlay.querySelector('use').setAttribute('href', '#icon-pause');
@@ -5168,6 +6489,7 @@ function stopPlayback() {
   state.playing = false;
   if (state.playbackFrame) cancelAnimationFrame(state.playbackFrame);
   state.playbackFrame = null;
+  state.playbackEnd = 0;
   elements.preview.pause();
   for (const element of state.previewLayers.values()) element.pause?.();
   stopTimelineAudioPlayers();
@@ -5177,7 +6499,7 @@ function stopPlayback() {
 function playbackTick(now) {
   if (!state.playing) return;
   const time = state.playbackOrigin + (now - state.playbackStartedAt) / 1000;
-  const end = projectEnd();
+  const end = state.playbackEnd || projectEnd();
   if (time >= end) {
     setPlayhead(end, false);
     stopPlayback();
@@ -5199,6 +6521,20 @@ function maxTrackFor(time, kinds) {
   return max;
 }
 
+function activeTrackMaxima(time) {
+  const maxima = { color: 0, blur: 0, text: 0, html: 0, visual: 0 };
+  for (const clip of state.clips) {
+    if (!layerVisible(clip.trackIndex || 0) || time < clip.start || time >= clip.start + clipDuration(clip)) continue;
+    const track = clip.trackIndex || 0;
+    if (clip.kind === 'color') maxima.color = Math.max(maxima.color, track);
+    else if (clip.kind === 'blur') maxima.blur = Math.max(maxima.blur, track);
+    else if (clip.kind === 'text') maxima.text = Math.max(maxima.text, track);
+    else if (clip.kind === 'html') maxima.html = Math.max(maxima.html, track);
+    else if (['video', 'image'].includes(clip.kind)) maxima.visual = Math.max(maxima.visual, track);
+  }
+  return maxima;
+}
+
 const OVERLAY_BASE = { 'color-layer': 2, 'blur-layer': 3, 'text-layer': 4, 'html-layer': 5, 'transcript-overlay': 6 };
 function setOverlayZ(className, maxTrack) {
   const el = className === 'blur-layer' ? elements.blurLayer : elements.previewWindow.querySelector('.' + className);
@@ -5211,15 +6547,12 @@ function syncPlaybackMedia(time) {
   const baseTrack = visual ? (visual.trackIndex || 0) : -1;
   if (elements.imagePreview.style) elements.imagePreview.style.zIndex = String(Math.max(0, baseTrack * 10));
   if (elements.preview.style) elements.preview.style.zIndex = String(Math.max(0, baseTrack * 10));
-  const maxColor = maxTrackFor(time, ['color']);
-  const maxBlur = maxTrackFor(time, ['blur']);
-  const maxText = maxTrackFor(time, ['text']);
-  const maxHtml = maxTrackFor(time, ['html']);
-  setOverlayZ('color-layer', maxColor);
-  setOverlayZ('blur-layer', maxBlur);
-  setOverlayZ('text-layer', maxText);
-  setOverlayZ('html-layer', maxHtml);
-  setOverlayZ('transcript-overlay', maxTrackFor(time, ['video', 'image', 'color', 'blur', 'text', 'html']));
+  const maxima = activeTrackMaxima(time);
+  setOverlayZ('color-layer', maxima.color);
+  setOverlayZ('blur-layer', maxima.blur);
+  setOverlayZ('text-layer', maxima.text);
+  setOverlayZ('html-layer', maxima.html);
+  setOverlayZ('transcript-overlay', Math.max(maxima.visual, maxima.color, maxima.blur, maxima.text, maxima.html));
   renderBlurOverlays(time);
   renderColorOverlays(time);
   renderTextOverlays(time);
@@ -5240,6 +6573,12 @@ function syncPlaybackMedia(time) {
   }
   for (const audio of activeAudio) {
     const player = timelineAudioPlayer(audio);
+    // A hidden media element must still be explicitly audible.  Some
+    // browsers preserve muted/defaultMuted from a previous source or from a
+    // preloader when the element is reused.
+    player.defaultMuted = false;
+    player.muted = false;
+    player.volume = 1;
     const sourceTime = audio.trimStart + time - audio.start;
     const targetTime = clamp(sourceTime, 0, audio.mediaDuration);
     const changed = player.dataset.mediaId !== audio.mediaId;
@@ -5249,23 +6588,35 @@ function syncPlaybackMedia(time) {
       } catch (_error) { /* metadata laddas fortfarande */ }
     };
     if (changed) {
+      player.pause();
+      player._playbackRetryPending = false;
       player.src = `/api/media/${encodeURIComponent(audio.mediaId)}/file`;
       player.dataset.mediaId = audio.mediaId;
+      // Calling load() after changing src makes the source switch reliable
+      // for detached/hidden audio elements (notably Chromium after a clip
+      // boundary).  jsdom does not implement load(), so skip it there.
+      if (!/jsdom/i.test(navigator.userAgent || '') && typeof player.load === 'function') player.load();
       if (player.readyState >= 1) seek();
       else player.addEventListener('loadedmetadata', seek, { once: true });
+      player.addEventListener('canplay', () => playMediaElementWhenReady(player), { once: true });
+      player.addEventListener('loadeddata', () => playMediaElementWhenReady(player), { once: true });
     } else if (player.readyState >= 1 && Math.abs(player.currentTime - targetTime) > 0.15) {
       seek();
     }
+    if (!activeVisualLayers(time).length) watchPreviewMediaReadiness(player, audio, true);
     if (player.paused) player.play().catch(() => {});
+    playMediaElementWhenReady(player);
   }
 }
 
 function setPlayhead(seconds, updatePreview = true) {
   state.playhead = Math.max(0, seconds);
-  updateTimelineWidth();
+  if (updatePreview) updateTimelineWidth();
   elements.playhead.style.left = `${secondsToPixels(state.playhead)}px`;
   updatePlayheadFollowIndicator();
   elements.timecode.textContent = formatTime(state.playhead);
+  updateTranscriptionPlayheadHighlight();
+  if (editorHistory.clipboard) renderProgramClipboard();
   followPlayheadIntoView();
   if (!updatePreview) return;
   const p = state.playhead;
@@ -5285,6 +6636,7 @@ function setPlayhead(seconds, updatePreview = true) {
   renderTranscriptOverlay(state.playhead);
   persist();
   renderLayerMedia(state.playhead, state.playing);
+  preloadUpcomingMedia(state.playhead);
   const visible = timelineModel.topActiveVisual(state.clips, state.playhead);
   if (state.cropActive) {
     if (visible && visible.id === state.selectedId) showCropOverlay();
@@ -5399,8 +6751,25 @@ elements.timeline.addEventListener('dblclick', (event) => {
   event.preventDefault();
 });
 
+elements.timeline.addEventListener('click', (event) => {
+  if (!state.pendingSegmentImport) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const point = timelinePointFromClient(event.clientX, event.clientY);
+  const destination = snapSegmentTime(pixelsToSeconds(point.x));
+  const segment = state.pendingSegmentImport;
+  state.pendingSegmentImport = null;
+  document.body.classList.remove('segment-import-armed');
+  openTrackPlacementModal({ type: 'segment-import', segment, destination });
+}, true);
+
 elements.timeline.addEventListener('mousedown', (event) => {
   if (event.button !== 0) return;
+  if (state.pendingSegmentImport) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
   if (state.playing) stopPlayback();
   const clipElement = event.target.closest('.clip');
   if (event.target === elements.playhead || event.target.closest('.playhead')) {
@@ -5509,6 +6878,33 @@ function moveDraggedVisualClipsToTrack(action, targetTrackIndex) {
   return true;
 }
 
+function moveDraggedAudioClipsToTrack(action, targetTrackIndex) {
+  const movingAudio = action.movingClips.filter((item) => item.clip.kind === 'audio');
+  const primary = movingAudio.find((item) => item.clip.id === action.clip.id);
+  if (!primary || !movingAudio.length) return false;
+  const minimumTrack = Math.min(...movingAudio.map((item) => item.originalTrackIndex));
+  const requestedDelta = targetTrackIndex - primary.originalTrackIndex;
+  const trackDelta = Math.max(-minimumTrack, requestedDelta);
+  const assignments = movingAudio.map((item) => ({
+    item,
+    trackIndex: item.originalTrackIndex + trackDelta
+  }));
+  if (assignments.every(({ item, trackIndex }) => (item.clip.trackIndex || 0) === trackIndex)) return false;
+
+  recordTimelineActionHistory(action);
+  ensureAudioTrack(Math.max(...assignments.map(({ trackIndex }) => trackIndex)));
+  for (const { item, trackIndex } of assignments) {
+    const clip = item.clip;
+    clip.trackIndex = trackIndex;
+    const element = document.querySelector(`.clip[data-id="${CSS.escape(clip.id)}"]`);
+    if (element && element.parentNode !== state.audioTrackEls[trackIndex]) {
+      element.remove();
+      ensureAudioTrack(trackIndex).appendChild(element);
+    }
+  }
+  return true;
+}
+
 const SNAP_PX = 8;
 
 function snapCandidates() {
@@ -5595,19 +6991,36 @@ document.addEventListener('mousemove', (event) => {
     const yDelta = event.clientY - action.originY;
     if (Math.abs(yDelta) >= 45) {
       const trackEl = event.target.closest('.track') || document.elementFromPoint?.(event.clientX, event.clientY)?.closest('.track');
-      if (trackEl?.classList.contains('visual-track')) {
+      if (trackEl?.classList.contains('audio-track')) {
+        const trackIndex = state.audioTrackEls.indexOf(trackEl);
+        if (trackIndex >= 0) {
+          action.originY = event.clientY;
+          moveDraggedAudioClipsToTrack(action, trackIndex);
+        }
+      } else if (trackEl?.classList.contains('visual-track')) {
         const trackIndex = state.visualTrackEls.indexOf(trackEl);
         if (trackIndex >= 0) {
           action.originY = event.clientY;
           moveDraggedVisualClipsToTrack(action, trackIndex);
         }
       } else {
-        const topTrack = state.visualTrackEls.at(-1);
-        if (topTrack) {
-          const topRect = topTrack.getBoundingClientRect();
-          if (event.clientY < topRect.top) {
-            action.originY = event.clientY;
-            moveDraggedVisualClipsToTrack(action, state.visualTrackEls.length);
+        if (action.clip.kind === 'audio') {
+          const bottomTrack = state.audioTrackEls.at(-1);
+          if (bottomTrack) {
+            const bottomRect = bottomTrack.getBoundingClientRect();
+            if (event.clientY > bottomRect.bottom) {
+              action.originY = event.clientY;
+              moveDraggedAudioClipsToTrack(action, state.audioTrackEls.length);
+            }
+          }
+        } else {
+          const topTrack = state.visualTrackEls.at(-1);
+          if (topTrack) {
+            const topRect = topTrack.getBoundingClientRect();
+            if (event.clientY < topRect.top) {
+              action.originY = event.clientY;
+              moveDraggedVisualClipsToTrack(action, state.visualTrackEls.length);
+            }
           }
         }
       }
@@ -5757,32 +7170,190 @@ function removeSelectedClip() {
 }
 
 function copySelectedClip() {
-  const clip = state.clips.find((item) => item.id === state.selectedId);
+  const selected = state.clips.filter((item) => state.selectedIds.has(item.id));
+  const clip = selected.find((item) => item.id === state.selectedId) || selected[0]
+    || state.clips.find((item) => item.id === state.selectedId);
   if (!clip) return false;
-  editorHistory.clipboard = cloneValue(clip);
+  if (selected.length > 1) {
+    const start = Math.min(...selected.map((item) => item.start));
+    const end = Math.max(...selected.map((item) => item.start + clipDuration(item)));
+    const segment = timelineModel.sliceClipsToSegment(selected, start, end);
+    if (!segment) return false;
+    editorHistory.clipboard = { type: 'segment', duration: segment.duration, clips: segment.clips };
+  } else {
+    editorHistory.clipboard = { type: 'clip', clip: cloneValue(clip) };
+  }
+  renderProgramClipboard();
   return true;
 }
 
-function insertClipCopy(source, start) {
+function internalClipboardPayload() {
+  const clipboard = editorHistory.clipboard;
+  if (!clipboard) return null;
+  if (clipboard.type === 'segment' && Array.isArray(clipboard.clips)) return clipboard;
+  if (clipboard.type === 'clip' && clipboard.clip) return clipboard;
+  return { type: 'clip', clip: clipboard };
+}
+
+function renderProgramClipboard() {
+  const clipboard = internalClipboardPayload();
+  elements.programClipboard.hidden = !clipboard;
+  if (!clipboard) return;
+  if (clipboard.type === 'segment') {
+    elements.programClipboardSummary.value = `${clipboard.clips.length} klipp · ${Number(clipboard.duration).toFixed(2)} s`;
+  } else {
+    elements.programClipboardSummary.value = `1 klipp · ${clipDuration(clipboard.clip).toFixed(2)} s`;
+  }
+  elements.pasteProgramClipboard.title = `Klistra in vid ${formatTime(state.playhead)}`;
+}
+
+function clearProgramClipboard() {
+  editorHistory.clipboard = null;
+  renderProgramClipboard();
+}
+
+function copyMarkedSegment() {
+  const range = state.segmentRange;
+  if (!range) return false;
+  const segment = timelineModel.sliceClipsToSegment(state.clips, range.start, range.end);
+  if (!segment) {
+    elements.segmentCopyStatus.textContent = 'Det finns inga klipp inom segmentet.';
+    return false;
+  }
+  editorHistory.clipboard = { type: 'segment', duration: segment.duration, clips: segment.clips };
+  renderProgramClipboard();
+  closeSegmentCopyTool();
+  return true;
+}
+
+function renderSegmentLibrary() {
+  const list = elements.segmentLibraryList;
+  if (!list) return;
+  elements.segmentLibraryCount.textContent = `${state.segmentLibrary.length} segment`;
+  if (!state.segmentLibrary.length) {
+    list.replaceChildren(Object.assign(document.createElement('div'), {
+      className: 'segment-library-empty', textContent: 'Inga sparade segment ännu.'
+    }));
+    return;
+  }
+  list.replaceChildren(...state.segmentLibrary.map((segment) => {
+    const item = document.createElement('div');
+    item.className = 'segment-library-item';
+    item.setAttribute('role', 'listitem');
+    const name = document.createElement('strong');
+    name.textContent = segment.name;
+    name.title = segment.name;
+    const meta = document.createElement('small');
+    meta.textContent = `${segment.clips.length} klipp · ${Number(segment.duration).toFixed(2)} s`;
+    const importButton = document.createElement('button');
+    importButton.type = 'button';
+    importButton.textContent = 'Importera';
+    importButton.title = 'Välj plats i tidslinjen för kopian';
+    importButton.addEventListener('click', () => armSavedSegmentImport(segment));
+    const removeButton = document.createElement('button');
+    removeButton.type = 'button';
+    removeButton.textContent = '×';
+    removeButton.setAttribute('aria-label', `Ta bort segmentet ${segment.name}`);
+    removeButton.title = 'Ta bort sparat segment';
+    removeButton.addEventListener('click', () => {
+      state.segmentLibrary = state.segmentLibrary.filter((entry) => entry.id !== segment.id);
+      renderSegmentLibrary();
+      persist();
+    });
+    item.append(name, meta, importButton, removeButton);
+    return item;
+  }));
+}
+
+function saveNamedSegment() {
+  const range = state.segmentRange;
+  const name = String(elements.segmentName?.value || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+  if (!range || !name) return false;
+  const segment = timelineModel.sliceClipsToSegment(state.clips, range.start, range.end);
+  if (!segment) {
+    elements.segmentCopyStatus.textContent = 'Det finns inga klipp inom segmentet.';
+    return false;
+  }
+  segment.clips.forEach((clip) => { if (clip.mediaId) state.projectMediaIds.add(clip.mediaId); });
+  state.segmentLibrary = [
+    ...state.segmentLibrary.filter((entry) => entry.name.toLowerCase() !== name.toLowerCase()),
+    { id: crypto.randomUUID(), name, duration: segment.duration, clips: segment.clips }
+  ];
+  resetSegmentSelection();
+  renderSegmentLibrary();
+  elements.segmentCopyStatus.textContent = `Segmentet “${name}” sparades.`;
+  persist();
+  return true;
+}
+
+function armSavedSegmentImport(segment) {
+  if (!segment?.clips?.length || !(Number(segment.duration) > 0)) return false;
+  state.pendingSegmentImport = segment;
+  document.body.classList.add('segment-import-armed');
+  elements.segmentCopyStatus.textContent = `Klicka i tidslinjen där “${segment.name}” ska importeras.`;
+  return true;
+}
+
+function importSavedSegment(segment, destination = state.playhead) {
+  if (!segment?.clips?.length || !(Number(segment.duration) > 0)) return false;
+  const copies = timelineModel.materializeSegmentClips(segment, destination, () => crypto.randomUUID());
+  if (!copies.length) return false;
+  recordHistory();
+  rippleInsert(destination, segment.duration, copies);
+  state.clips.push(...copies);
+  rebuildTrackLayout(copies.map((clip) => clip.id));
+  selectClips(copies.map((clip) => clip.id), copies[0].id);
+  if (copies.some((clip) => clip.mediaId === state.transcriptionMediaId)) renderTranscription();
+  setPlayhead(destination);
+  persist();
+  elements.segmentCopyStatus.textContent = `“${segment.name}” importerades som kopia.`;
+  return true;
+}
+
+function insertClipCopy(source, start, trackIndex = null) {
   const clip = cloneValue(source);
   clip.id = crypto.randomUUID();
   delete clip.linkGroupId;
   delete clip.transitionIn;
   clip.name = `${source.name} (kopia)`;
   clip.start = Math.max(0, start);
-  clip.trackIndex = allocateTrack(clip.kind, clip.start, clip.start + clipDuration(clip));
+  clip.trackIndex = Number.isInteger(trackIndex)
+    ? Math.max(0, trackIndex)
+    : Number.isFinite(Number(source.trackIndex)) ? Number(source.trackIndex) : 0;
+  rippleInsert(clip.start, clipDuration(clip), [clip]);
   state.clips.push(clip);
   createClipElement(clip);
   if (clip.mediaId === state.transcriptionMediaId) renderTranscription();
   selectClip(clip.id);
   setPlayhead(clip.start);
+  persist();
   return clip;
 }
 
 function pasteClipboard() {
-  if (!editorHistory.clipboard) return false;
+  const clipboard = internalClipboardPayload();
+  if (!clipboard) return false;
+  if (elements.trackPlacementModal) {
+    return openTrackPlacementModal({ type: 'clipboard-paste', clipboard, atTime: state.playhead });
+  }
   recordHistory();
-  insertClipCopy(editorHistory.clipboard, state.playhead);
+  if (clipboard.type === 'segment') {
+    const copies = timelineModel.materializeSegmentClips(clipboard, state.playhead, () => crypto.randomUUID());
+    if (!copies.length) return false;
+    rippleInsert(state.playhead, clipboard.duration, copies);
+    state.clips.push(...copies);
+    const liftedIds = copies
+      .slice()
+      .sort((a, b) => (a.trackIndex || 0) - (b.trackIndex || 0))
+      .map((clip) => clip.id);
+    rebuildTrackLayout(liftedIds);
+    selectClips(copies.map((clip) => clip.id), copies[0].id);
+    if (copies.some((clip) => clip.mediaId === state.transcriptionMediaId)) renderTranscription();
+    setPlayhead(state.playhead);
+    persist();
+  } else {
+    insertClipCopy(clipboard.clip, state.playhead);
+  }
   return true;
 }
 
@@ -5814,6 +7385,11 @@ function handleKeyboardShortcut(event) {
   if (key === 'escape' && !elements.transitionModal.hidden) {
     event.preventDefault();
     closeTransitionPicker();
+    return;
+  }
+  if (key === 'escape' && state.segmentSelectionActive) {
+    event.preventDefault();
+    closeSegmentCopyTool();
     return;
   }
 
@@ -5874,22 +7450,123 @@ function handleKeyboardShortcut(event) {
   }
 }
 
-async function exportProject(format) {
+function buildExportSelection() {
+  if (state.segmentSelectionActive && state.segmentRange) {
+    const segment = timelineModel.sliceClipsToSegment(
+      state.clips,
+      state.segmentRange.start,
+      state.segmentRange.end
+    );
+    if (!segment) return null;
+    return {
+      type: 'segment',
+      label: 'segment',
+      clips: segment.clips,
+      duration: segment.duration,
+      count: segment.clips.length
+    };
+  }
+  const selected = state.clips.filter((clip) => state.selectedIds.has(clip.id));
+  if (!selected.length) return null;
+  const start = Math.min(...selected.map((clip) => clip.start));
+  const end = Math.max(...selected.map((clip) => clip.start + clipDuration(clip)));
+  const sliced = timelineModel.sliceClipsToSegment(selected, start, end);
+  if (!sliced) return null;
+  return {
+    type: 'clips',
+    label: selected.length === 1 ? 'markerat klipp' : `${selected.length} markerade klipp`,
+    clips: sliced.clips,
+    duration: sliced.duration,
+    count: sliced.clips.length
+  };
+}
+
+function updateExportSelectionButton() {
+  if (!elements.exportSelection) return;
+  const hasSegment = Boolean(state.segmentSelectionActive && state.segmentRange && clipsInSegmentRange().length);
+  const hasClips = state.selectedIds.size > 0;
+  elements.exportSelection.disabled = !hasSegment && !hasClips;
+  elements.exportSelection.textContent = hasSegment ? 'Exportera segment som MP4' : 'Exportera val som MP4';
+  elements.exportSelection.title = hasSegment
+    ? 'Exportera allt mellan segmentets IN- och UT-punkt'
+    : hasClips
+      ? 'Exportera endast markerade klipp'
+      : 'Markera klipp eller ange ett IN/UT-segment först';
+}
+
+function openExportModal(format, scope = 'project') {
   if (!state.clips.length) return alert('Ladda upp minst ett klipp först.');
   const normalizedFormat = ['mp4', 'mp3', 'wav'].includes(format) ? format : 'mp4';
   const formatLabel = normalizedFormat.toUpperCase();
+  const selection = scope === 'selection' ? buildExportSelection() : null;
+  if (scope === 'selection' && !selection) return alert('Markera minst ett klipp eller ange ett IN/UT-segment först.');
+  state.pendingExportFormat = normalizedFormat;
+  state.pendingExportSelection = selection;
   elements.modal.hidden = false;
-  elements.exportTitle.textContent = `Exporterar ${formatLabel}`;
+  elements.exportTitle.textContent = selection
+    ? `Exportera ${selection.label} · ${formatLabel}`
+    : `Exportera ${formatLabel}`;
+  elements.exportSetup.hidden = false;
+  elements.progress.hidden = true;
   elements.progress.value = 0;
-  elements.download.hidden = true;
-  elements.download.textContent = `Ladda ner ${formatLabel}`;
+  elements.cancelExport.hidden = true;
+  elements.startExport.hidden = false;
+  elements.startExport.disabled = !state.outputDirectorySelection;
+  elements.outputFolderPath.textContent = state.outputDirectorySelection?.path || 'Ingen mapp vald';
+  elements.outputFolderPath.title = state.outputDirectorySelection?.path || '';
+  const selectionSummary = selection
+    ? `${selection.count} klipp · ${selection.duration.toFixed(2)} s. `
+    : '';
+  elements.exportMessage.textContent = selectionSummary + (state.outputDirectorySelection
+    ? 'Tryck Exportera för att starta.'
+    : 'Välj output-mapp och starta exporten.');
+}
+
+async function chooseOutputFolder() {
+  elements.chooseOutputFolder.disabled = true;
+  elements.exportMessage.textContent = 'Öppnar mappväljaren…';
+  try {
+    const selection = await api('/api/export/select-folder', { method: 'POST' });
+    if (!selection.cancelled) {
+      state.outputDirectorySelection = selection;
+      elements.outputFolderPath.textContent = selection.path;
+      elements.outputFolderPath.title = selection.path;
+      elements.startExport.disabled = false;
+      elements.exportMessage.textContent = 'Tryck Exportera för att starta.';
+    } else {
+      elements.exportMessage.textContent = state.outputDirectorySelection
+        ? 'Mappvalet avbröts. Den tidigare mappen är kvar.'
+        : 'Ingen output-mapp vald.';
+    }
+  } catch (error) {
+    elements.exportMessage.textContent = `Kunde inte välja output-mapp: ${error.message}`;
+  } finally {
+    elements.chooseOutputFolder.disabled = false;
+  }
+}
+
+async function exportProject(format) {
+  if (!state.outputDirectorySelection) {
+    elements.exportMessage.textContent = 'Välj output-mapp först.';
+    return;
+  }
+  const normalizedFormat = ['mp4', 'mp3', 'wav'].includes(format) ? format : 'mp4';
+  const formatLabel = normalizedFormat.toUpperCase();
+  const selection = state.pendingExportSelection;
+  elements.exportTitle.textContent = selection
+    ? `Exporterar ${selection.label} · ${formatLabel}`
+    : `Exporterar ${formatLabel}`;
+  elements.exportSetup.hidden = true;
+  elements.progress.hidden = false;
+  elements.progress.value = 0;
+  elements.startExport.hidden = true;
   elements.cancelExport.hidden = false;
   elements.exportMessage.textContent = 'Skickar tidslinjen till FFmpeg…';
   try {
     let exportCanvas = state.canvas;
-    let exportClips = state.clips;
+    let exportClips = selection ? cloneValue(selection.clips) : state.clips;
     if (elements.autoFitCanvas.checked) {
-      const fitted = fitProjectToContent();
+      const fitted = fitProjectToContent(exportClips);
       if (fitted) {
         exportCanvas = fitted.canvas;
         exportClips = fitted.clips;
@@ -5903,7 +7580,7 @@ async function exportProject(format) {
         minY: windowRect.y,
         maxX: windowRect.x + windowRect.width,
         maxY: windowRect.y + windowRect.height
-      });
+      }, exportClips);
       if (transformed) {
         exportCanvas = transformed.canvas;
         exportClips = transformed.clips;
@@ -5920,10 +7597,11 @@ async function exportProject(format) {
         quality: normalizedFormat === 'mp4' ? Number(elements.exportQuality.value) : null,
         hardware: normalizedFormat === 'mp4' ? 'nvidia' : 'cpu',
         upscale: normalizedFormat === 'mp4' && elements.useUpscale.checked,
+        outputDirectoryToken: state.outputDirectorySelection.token,
         hiddenLayers: [...state.hiddenLayers],
-        subtitles: normalizedFormat === 'mp4' ? exportSubtitleCues() : null,
-        clips: exportClips.map(({ mediaId, kind, start, trimStart, trimEnd, crop, blur, color, html, text, muted, trackIndex, transitionIn, visualScale, animIn, posX, posY, circular }) => ({
-          mediaId, kind, start, trimStart, trimEnd, crop, blur, color, html, text, muted, trackIndex, transitionIn, visualScale, animIn, posX, posY, circular
+        subtitles: normalizedFormat === 'mp4' ? exportSubtitleCues(exportClips) : null,
+        clips: exportClips.map(({ mediaId, kind, start, trimStart, trimEnd, crop, blur, color, html, text, muted, trackIndex, transitionIn, visualScale, animIn, animOut, posX, posY, circular }) => ({
+          mediaId, kind, start, trimStart, trimEnd, crop, blur, color, html, text, muted, trackIndex, transitionIn, visualScale, animIn, animOut, posX, posY, circular
         }))
       })
     });
@@ -5931,6 +7609,11 @@ async function exportProject(format) {
     pollJob(job.id);
   } catch (error) {
     elements.exportMessage.textContent = `Exporten kunde inte starta: ${error.message}`;
+    elements.exportSetup.hidden = false;
+    elements.progress.hidden = true;
+    elements.startExport.hidden = false;
+    elements.startExport.disabled = !state.outputDirectorySelection;
+    elements.cancelExport.hidden = true;
   }
 }
 
@@ -5962,30 +7645,38 @@ async function pollJob(id) {
     else elements.progress.value = job.progress || 0;
     const eta = formatEta(job.etaSeconds);
     const phaseMessage = job.phase === 'prepare'
-      ? 'Verifierar NVIDIA CUDA och förbereder exporten…'
+      ? 'Verifierar NVIDIA NVENC och förbereder exporten…'
       : job.phase === 'html-render'
         ? 'Renderar HTML-lager före GPU-exporten…'
         : job.phase === 'seek-decode' && !(job.progress > 0)
-          ? 'CUDA/NVDEC söker direkt till klippens startpunkter…'
+          ? 'FFmpeg söker direkt till klippens startpunkter…'
           : null;
     elements.exportMessage.textContent = job.status === 'queued'
       ? 'Väntar på FFmpeg…'
       : phaseMessage || `${job.encoder || 'FFmpeg'} · ${job.progress || 0} %${eta ? ` · ${eta}` : ''}`;
     if (job.status === 'completed') {
-      elements.exportMessage.textContent = `Klar med ${job.encoder}.`;
-      elements.download.href = `/api/jobs/${encodeURIComponent(id)}/download`;
-      elements.download.hidden = false;
+      elements.exportMessage.textContent = job.outputDirectory && job.outputFileName
+        ? `Klar. Sparad som ${job.outputFileName}\ni ${job.outputDirectory}`
+        : `Klar med ${job.encoder}.`;
       elements.cancelExport.hidden = true;
       return;
     }
     if (job.status === 'failed') {
       elements.exportMessage.textContent = `Exporten misslyckades:\n${job.error}`;
       elements.cancelExport.hidden = true;
+      elements.exportSetup.hidden = false;
+      elements.progress.hidden = true;
+      elements.startExport.hidden = false;
+      elements.startExport.disabled = !state.outputDirectorySelection;
       return;
     }
     if (job.status === 'cancelled') {
       elements.exportMessage.textContent = 'Exporten avbröts.';
       elements.cancelExport.hidden = true;
+      elements.exportSetup.hidden = false;
+      elements.progress.hidden = true;
+      elements.startExport.hidden = false;
+      elements.startExport.disabled = !state.outputDirectorySelection;
       return;
     }
     if (job.status === 'upscaling') {
@@ -6004,12 +7695,18 @@ function newProject(options = {}) {
   if (!skipConfirmation && state.clips.length > 0 && !confirm('Skapa nytt projekt? Olagrade ändringar förloras.')) {
     return false;
   }
+  if (!skipConfirmation && !askForProjectName()) return false;
   stopPlayback();
   stopTimelineAudioPlayers(true);
   state.clips.forEach((clip) => {
     document.querySelector(`.clip[data-id="${CSS.escape(clip.id)}"]`)?.remove();
   });
   state.clips = [];
+  state.projectName = skipConfirmation ? '' : state.projectName;
+  state.savedProjectName = state.projectName;
+  state.projectNameDirty = false;
+  state.projectMediaIds = new Set();
+  state.segmentLibrary = [];
   state.selectedId = null;
   state.selectedIds = new Set();
   state.canvas = null;
@@ -6018,16 +7715,29 @@ function newProject(options = {}) {
   state.cropPreview = null;
   state.transcriptionMediaId = null;
   state.transcriptionSegments = [];
+  state.transcriptionEditMode = false;
   state.transcriptionWords = [];
   state.transcriptionIndex = new Map();
   state.transcriptSearchResults = [];
   state.transcriptSearchCursor = -1;
+  state.selectedTranscriptionSegmentIndex = -1;
+  state.selectedTranscriptionSourceClipId = null;
   state.flags = [];
   state.selectedFlagId = null;
   state.editingFlagId = null;
   state.currentJobId = null;
   state.currentTranscribeJobId = null;
   state.transcribingClipId = null;
+  state.segmentSelectionActive = false;
+  state.segmentDraftStart = null;
+  state.segmentRange = null;
+  state.segmentPointDrag = null;
+  state.pendingSegmentImport = null;
+  state.pendingTrackPlacement = null;
+  if (elements.trackPlacementModal) elements.trackPlacementModal.hidden = true;
+  renderProjectName();
+  renderMediaBin();
+  elements.segmentCopyPopover.hidden = true;
   clearDynamicTracks();
   elements.visualTrack.replaceChildren();
   elements.transcriptionTrack.replaceChildren();
@@ -6044,6 +7754,7 @@ function newProject(options = {}) {
   updateTimelineWidth();
   updatePreviewWindowSize();
   syncCanvasControls();
+  renderSegmentSelection();
   clearPersisted();
   recordHistory();
   setPlayhead(0);
@@ -6051,6 +7762,7 @@ function newProject(options = {}) {
 }
 
 function saveProject() {
+  if (!ensureProjectNamed()) return;
   const data = buildProjectFile();
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -6062,7 +7774,7 @@ function saveProject() {
   showSaveIndicator('Projektfil sparad');
 }
 
-const PROJECT_FILE_VERSION = 3;
+const PROJECT_FILE_VERSION = 4;
 
 function buildProjectFile() {
   return {
@@ -6114,7 +7826,36 @@ function projectSnapshotFromData(data) {
         width: finiteOr(data.exportWindow.width), height: finiteOr(data.exportWindow.height)
       }
     : null;
+  const projectMediaIds = new Set(
+    Array.isArray(data.projectMediaIds) ? data.projectMediaIds.filter((id) => typeof id === 'string') : []
+  );
+  clips.forEach((clip) => { if (clip.mediaId) projectMediaIds.add(clip.mediaId); });
+  const segmentLibrary = Array.isArray(data.segmentLibrary)
+    ? data.segmentLibrary
+      .filter((segment) => segment && typeof segment.name === 'string' && Array.isArray(segment.clips))
+      .map((segment) => ({
+        id: typeof segment.id === 'string' ? segment.id : crypto.randomUUID(),
+        name: segment.name.trim().slice(0, 120) || 'Namnlöst segment',
+        duration: Number(segment.duration) > 0 ? Number(segment.duration) : 0,
+        clips: cloneValue(segment.clips)
+      }))
+    : [];
+  segmentLibrary.forEach((segment) => segment.clips.forEach((clip) => {
+    if (clip?.mediaId) projectMediaIds.add(clip.mediaId);
+  }));
+  const mediaSources = Array.isArray(data.mediaSources)
+    ? data.mediaSources
+      .filter((media) => media && typeof media.id === 'string' && typeof media.sourcePath === 'string' && media.sourcePath)
+      .map((media) => ({ id: media.id, name: String(media.name || '').slice(0, 200), sourcePath: media.sourcePath }))
+    : [];
   return {
+    projectName: typeof data.projectName === 'string' ? data.projectName.trim().slice(0, 120) : '',
+    segmentLibrary,
+    projectMediaIds: [...projectMediaIds],
+    mediaSources,
+    importLayer: data.importLayer === 'auto' || data.importLayer == null
+      ? 'auto'
+      : Math.max(0, Math.floor(Number(data.importLayer) || 0)),
     clips,
     selectedId: clips.some((clip) => clip.id === data.selectedId) ? data.selectedId : null,
     playhead: Math.max(0, finiteOr(data.playhead)),
@@ -6136,6 +7877,7 @@ async function loadProject() {
     const text = await file.text();
     const data = JSON.parse(text);
     const snapshot = projectSnapshotFromData(data);
+    if (!snapshot.projectName) snapshot.projectName = String(file.name || 'Importerat projekt').replace(/\.json$/i, '') || 'Importerat projekt';
     if (state.clips.length > 0 && !confirm('Öppna projekt? Nuvarande projekt ersätts.')) return;
     newProject({ skipConfirmation: true });
     restoreEditor(snapshot);

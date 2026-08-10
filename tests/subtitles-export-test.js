@@ -18,7 +18,7 @@ if (!ass.includes('Dialogue: 0,0:00:00.50,0:00:02.00,Default,,0,0,0,,Hej alla'))
 if (!ass.includes('0:00:02.50,0:00:03.00')) throw new Error('Andra undertextcuen saknas.');
 console.log('Server-ASS OK');
 
-const ROOT = '/mnt/games/home-relocated/Downloads/videditor';
+const ROOT = path.resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
 const appJs = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
 const timelineModelJs = fs.readFileSync(path.join(ROOT, 'timeline-model.js'), 'utf8');

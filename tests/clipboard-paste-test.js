@@ -3,7 +3,7 @@ const path = require('path');
 const { JSDOM } = require('jsdom');
 const { installDomStubs } = require('./jsdom-helpers');
 
-const ROOT = '/mnt/games/home-relocated/Downloads/videditor';
+const ROOT = path.resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
 const appJs = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
 const timelineModelJs = fs.readFileSync(path.join(ROOT, 'timeline-model.js'), 'utf8');
@@ -68,6 +68,7 @@ setTimeout(() => {
     const png = new window.File(['x'], 'screenshot.png', { type: 'image/png' });
     pasteImages([png]);
     setTimeout(() => {
+      document.querySelector('#confirm-track-placement').click();
       const imageClips = document.querySelectorAll('.clip.image');
       console.log('After paste image:');
       console.log('  media POSTs:', mediaPosts, '(expect 1)');
@@ -85,6 +86,7 @@ setTimeout(() => {
       console.log('Ctrl+V med klipp-urklipp preventDefault:', pasteEvent.defaultPrevented, '(expect true)');
       if (!pasteEvent.defaultPrevented) throw new Error('Ctrl+V klistrade inte in det kopierade klippet.');
       setTimeout(() => {
+        document.querySelector('#confirm-track-placement').click();
         const imageClips2 = document.querySelectorAll('.clip.image');
         console.log('  image clips after clip-paste:', imageClips2.length, '(expect 2)');
         if (imageClips2.length !== 2) throw new Error('Klippet klistrades inte in som kopia.');

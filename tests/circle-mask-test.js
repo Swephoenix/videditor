@@ -4,7 +4,7 @@ const { JSDOM } = require('jsdom');
 const { installDomStubs } = require('./jsdom-helpers');
 const { buildCircleMaskFilter, buildVisualSizeFilter } = require('../server');
 
-const ROOT = '/mnt/games/home-relocated/Downloads/videditor';
+const ROOT = path.resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
 const appJs = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
 const timelineModelJs = fs.readFileSync(path.join(ROOT, 'timeline-model.js'), 'utf8');

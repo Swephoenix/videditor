@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="dark">
   <title>NVIDIA Video Editor</title>
-  <link rel="stylesheet" href="/styles.css?v=0.17.7">
+  <link rel="stylesheet" href="/styles.css?v=0.17.8">
 </head>
 <body>
   <header class="toolbar">
@@ -18,7 +18,7 @@
       <button id="load-project" class="toolbar-btn" title="Öppna projekt">📂</button>
     </div>
 
-    <button id="import-files" class="toolbar-btn" title="Importera mediafiler">Importera filer</button>
+    <button id="import-files" class="toolbar-btn" title="Välj mediafiler från datorn utan att kopiera dem">Importera filer</button>
 
     <label class="layer-picker" title="Vilket lager nästa importerade bild/video läggs på">
       <span class="layer-picker-label">Lager</span>
@@ -36,7 +36,7 @@
         <button id="add-text">Lägg till text</button>
         <button id="add-color">Lägg till färgblock</button>
         <button id="add-html">Lägg till HTML</button>
-        <button id="add-transition">Lägg till övergång</button>
+        <button id="add-transition" title="Markera exakt två video- eller bildklipp" disabled>Lägg till övergång</button>
         <button id="split" aria-keyshortcuts="S" title="Dela vid spelhuvud (S)">Dela vid spelhuvud</button>
         <button id="remove" aria-keyshortcuts="Delete Backspace" title="Ta bort markerat klipp (Delete)" disabled>Ta bort</button>
       </div>
@@ -74,7 +74,7 @@
           <input id="export-quality" type="range" min="1" max="5" step="1" value="5">
           <span class="quality-range-label">1 (låg) – 5 (lossless)</span>
         </label>
-        <label class="hardware menu-item" title="MP4-export kräver NVIDIA GPU"><input id="use-nvidia" type="checkbox" checked disabled> NVIDIA CUDA/NVDEC + NVENC (obligatorisk)</label>
+        <label class="hardware menu-item" title="MP4-export kräver NVIDIA GPU"><input id="use-nvidia" type="checkbox" checked disabled> NVIDIA NVENC-kodning (obligatorisk)</label>
         <label class="hardware menu-item"><input id="use-upscale" type="checkbox"> Snabb AI super-resolution 2×</label>
         <label class="hardware menu-item" title="Beskär exportytan till den minsta yta som faktiskt används av klippen och bilderna">
           <input id="auto-fit-canvas" type="checkbox"> Anpassa format till innehåll
@@ -83,12 +83,18 @@
           <input id="export-subtitles" type="checkbox"> Exportera undertexter
         </label>
         <button class="export" id="export">Exportera MP4</button>
+        <button id="export-selection" disabled title="Markera klipp eller ange ett IN/UT-segment först">Exportera val som MP4</button>
         <button id="export-mp3">Exportera ljud som MP3</button>
         <button id="export-wav">Exportera ljud som WAV</button>
       </div>
     </div>
 
     <span id="status" class="status">Ansluter…</span>
+    <div class="project-name-control" title="Dubbelklicka för att byta projektnamn">
+      <button id="project-name-display" type="button" aria-label="Projektnamn">Namnlöst projekt</button>
+      <input id="project-name-editor" type="text" maxlength="120" autocomplete="off" hidden aria-label="Ändra projektnamn">
+      <button id="save-project-name" type="button" hidden title="Spara projektnamnet">Spara</button>
+    </div>
 
     <div class="history-wrap">
       <button id="history-toggle" class="history-btn" title="Historik">⏱</button>
@@ -108,15 +114,40 @@
         <div id="log-list" class="log-list" role="log" aria-live="polite"></div>
       </div>
     </div>
+    <div id="program-clipboard" class="program-clipboard" hidden aria-label="Programurklipp">
+      <svg width="18" height="18" aria-hidden="true"><use href="#icon-segment-copy"></use></svg>
+      <div class="program-clipboard-info">
+        <strong>Urklipp</strong>
+        <output id="program-clipboard-summary" aria-live="polite"></output>
+      </div>
+      <button id="paste-program-clipboard" type="button">Klistra in</button>
+      <button id="clear-program-clipboard" type="button" class="program-clipboard-clear" aria-label="Töm urklippet" title="Töm urklippet">×</button>
+    </div>
   </header>
 
   <div class="editor-body">
     <div class="editor-main">
+      <aside id="media-pool" class="media-pool" aria-label="Mediehanterare">
+        <button id="media-pool-toggle" class="media-pool-toggle" type="button" aria-expanded="false" title="Visa mediehanteraren">Medier</button>
+        <div class="media-pool-heading">
+          <div>
+            <strong>Medier</strong>
+            <output id="media-pool-count">0</output>
+          </div>
+          <button id="import-to-media-pool" type="button" title="Importera filer till mediebiblioteket">＋</button>
+          <input id="media-pool-input" type="file" accept="video/*,audio/*,image/jpeg,image/png,image/webp,image/bmp,image/tiff,image/svg+xml,.svg" multiple hidden>
+        </div>
+        <p class="media-pool-hint">Filerna länkas via sina lokala sökvägar och kopieras inte.</p>
+        <div id="media-pool-list" class="media-pool-list" role="list"></div>
+        <output id="media-pool-status" class="media-pool-status" aria-live="polite"></output>
+      </aside>
       <main class="preview-area">
         <div class="preview-window">
-          <video id="preview" preload="auto"></video>
+          <video id="preview" preload="metadata" playsinline></video>
           <img id="image-preview" alt="Förhandsvisning av bild" hidden>
           <audio id="timeline-audio" preload="metadata" hidden></audio>
+          <div id="preview-media-status" class="preview-media-status" role="status" aria-live="polite" hidden></div>
+          <div id="preview-preload-status" class="preview-preload-status" role="status" aria-live="polite" hidden></div>
           <div id="blur-layer" class="blur-layer" aria-hidden="true"></div>
           <div id="html-layer" class="html-layer" aria-hidden="true"></div>
           <div id="transcript-overlay" class="transcript-overlay" aria-hidden="true" hidden></div>
@@ -146,7 +177,59 @@
           <div id="export-frame-label" class="export-frame-label">EXPORTYTA · 16:9 · 1600×900</div>
         </div>
       </main>
+      <div id="tools-panel-resizer" class="tools-panel-resizer" role="separator" aria-orientation="vertical" aria-label="Ändra bredd på högerpanelen" aria-valuemin="300" aria-valuemax="720" tabindex="0" hidden></div>
       <aside class="tools-panel" id="tools-panel">
+        <section id="transcription-tools" class="transcription-tools" aria-label="Redigera hela transkriberingen" hidden>
+          <div class="transcription-tools-heading">
+            <div>
+              <strong>Transkribering</strong>
+              <output id="transcription-tools-summary"></output>
+            </div>
+            <div class="transcription-tools-heading-actions">
+              <button id="edit-transcription" type="button">Redigera</button>
+              <button id="toggle-transcription" class="transcription-eye" type="button" title="Visa/dölj transkription i video" aria-label="Visa/dölj transkription i video" aria-pressed="false"><svg width="18" height="18" aria-hidden="true"><use href="#icon-transcription"></use></svg></button>
+              <input id="burn-transcription" type="checkbox" hidden>
+              <button id="copy-all-transcription" type="button">Kopiera allt</button>
+            </div>
+          </div>
+          <section class="transcript-search" aria-label="Sök i transkribering">
+            <label for="transcript-search-input">Sök ord</label>
+            <div class="transcript-search-controls">
+              <input id="transcript-search-input" type="search" autocomplete="off" placeholder="Ett eller flera sökord">
+              <button id="transcript-search-previous" type="button" aria-label="Föregående träff" disabled>‹</button>
+              <button id="transcript-search-next" type="button" aria-label="Nästa träff" disabled>›</button>
+            </div>
+            <output id="transcript-search-status" aria-live="polite">Ingen transkribering indexerad</output>
+            <div id="transcript-search-results" class="transcript-search-results" role="listbox" aria-label="Sökträffar" hidden></div>
+          </section>
+          <label class="transcription-editor-label" for="transcription-editor-all">Tidsstämplad transkribering</label>
+          <div class="transcription-editor-wrap">
+            <div id="transcription-editor-highlight" class="transcription-editor-highlight" aria-hidden="true">
+              <div id="transcription-editor-highlight-lines"></div>
+            </div>
+            <textarea id="transcription-editor-all" class="transcription-editor-all" rows="18" spellcheck="true"></textarea>
+          </div>
+          <p class="transcription-editor-hint">En rad per segment: [00:00.000–00:02.000] Text</p>
+          <div class="transcription-editor-actions">
+            <output id="transcription-editor-error" aria-live="polite"></output>
+            <button id="save-all-transcription" type="button" disabled>Spara allt</button>
+          </div>
+          <output id="transcription-copy-status" class="transcription-copy-status" aria-live="polite"></output>
+        </section>
+        <section id="image-size-tools" class="image-size-tools" aria-label="Storlek på markerad bild" hidden>
+          <div class="crop-heading">
+            <strong>Bildstorlek</strong>
+          </div>
+          <div class="image-size-grid">
+            <label for="image-width">Bredd
+              <span class="pixel-input"><input id="image-width" type="number" min="1" max="16384" step="1" inputmode="numeric"><span>px</span></span>
+            </label>
+            <label for="image-height">Höjd
+              <span class="pixel-input"><input id="image-height" type="number" min="1" max="16384" step="1" inputmode="numeric"><span>px</span></span>
+            </label>
+            <p>Proportionerna är låsta.</p>
+          </div>
+        </section>
         <section id="crop-tools" class="crop-tools" aria-label="Beskär markerat klipp" hidden>
         <div class="crop-heading">
           <strong>Beskär markerat klipp</strong>
@@ -178,10 +261,11 @@
           <label>Höjd <output class="val-color-height">100</output><input class="color-input" data-property="height" type="range" min="0.05" max="1" step="0.01" value="1"></label>
         </div>
       </section>
-      <section id="anim-tools" class="anim-tools" aria-label="In-animation för bild" hidden>
+      <section id="anim-tools" class="anim-tools" aria-label="Animation för video eller bild" hidden>
         <div class="crop-heading">
-          <strong>In-animation</strong>
+          <strong>Animation</strong>
         </div>
+        <div class="anim-group-label">In</div>
         <div class="anim-grid">
           <button type="button" class="anim-btn" data-anim="none">Ingen</button>
           <button type="button" class="anim-btn" data-anim="fade">Tona in</button>
@@ -191,6 +275,11 @@
             <output id="anim-dur-value">0.5 s</output>
             <input id="anim-duration" type="range" min="0.1" max="3" step="0.1" value="0.5">
           </label>
+        </div>
+        <div class="anim-group-label">Ut</div>
+        <div class="anim-grid">
+          <button type="button" class="anim-btn" data-anim-out="none">Ingen</button>
+          <button type="button" class="anim-btn" data-anim-out="fade">Tona ut</button>
         </div>
       </section>
       <section id="shape-tools" class="shape-tools" aria-label="Form på markerat klipp" hidden>
@@ -282,35 +371,6 @@
           </div>
         </div>
       </section>
-      <section id="audio-tools" class="audio-tools" aria-label="Ljudanalys och brusreducering" hidden>
-        <div class="crop-heading">
-          <strong>Ljudanalys</strong>
-        </div>
-        <canvas id="audio-waveform" class="audio-waveform" width="400" height="120"></canvas>
-        <div id="waveform-time" class="waveform-time"></div>
-        <div class="audio-tools-section">
-          <strong>Capture Noise Print</strong>
-          <p class="audio-hint">Dra i vågformen för att markera en kort del med enbart bakgrundsbrus, eller ange start/längd manuellt. Klicka på "Fånga".</p>
-          <div class="audio-param-row">
-            <label>Start (s) <input id="noise-print-start" class="audio-input" type="number" min="0" step="0.1" value="0"></label>
-            <label>Längd (s) <input id="noise-print-length" class="audio-input" type="number" min="0.1" max="5" step="0.1" value="0.5"></label>
-          </div>
-          <button id="capture-noise-print" type="button" class="audio-action-btn">Fånga brusprofil</button>
-          <div id="noise-print-status" class="noise-print-status">Ingen brusprofil fångad</div>
-        </div>
-        <div class="audio-tools-section">
-          <strong>Noise Reduction</strong>
-          <label>Reducering <output id="nr-amount-value">80</output>%<input id="nr-amount" type="range" min="0" max="98" step="1" value="80"></label>
-          <button id="apply-noise-reduction" type="button" class="audio-action-btn" disabled>Applicera brusreducering</button>
-        </div>
-        <div class="audio-tools-section">
-          <strong>Noise Gate</strong>
-          <label>Tröskel (0–100%) <output id="gate-threshold-value">5</output>%<input id="gate-threshold" type="range" min="0.1" max="50" step="0.5" value="5"></label>
-          <label>Attack <output id="gate-attack-value">2</output> ms<input id="gate-attack" type="range" min="0.1" max="50" step="0.5" value="2"></label>
-          <label>Release <output id="gate-release-value">50</output> ms<input id="gate-release" type="range" min="5" max="500" step="5" value="50"></label>
-          <button id="apply-noise-gate" type="button" class="audio-action-btn">Applicera Noise Gate</button>
-        </div>
-      </section>
       <div id="selection-info" class="selection-info">Inget klipp markerat</div>
     </aside>
   </div>
@@ -339,9 +399,21 @@
       <span class="html-tool-icon" aria-hidden="true">&lt;/&gt;</span>
       <span>HTML</span>
     </button>
+    <button class="quick-tool" id="qt-transcription" title="Visa/dölj transkription i previewvideon" aria-pressed="false">
+      <svg width="20" height="20" aria-hidden="true"><use href="#icon-transcription"></use></svg>
+      <span>Transkrib.</span>
+    </button>
+    <button class="quick-tool" id="qt-still-frame" title="Ta en stillbild vid playhead">
+      <svg width="20" height="20" aria-hidden="true"><use href="#icon-still-frame"></use></svg>
+      <span>Stillbild</span>
+    </button>
     <button class="quick-tool" id="qt-split" title="Dela vid spelhuvud (S)">
       <svg width="20" height="20" aria-hidden="true"><use href="#icon-split-playhead"></use></svg>
       <span>Dela</span>
+    </button>
+    <button class="quick-tool" id="qt-segment-copy" title="Markera och kopiera ett segment" aria-pressed="false">
+      <svg width="20" height="20" aria-hidden="true"><use href="#icon-segment-copy"></use></svg>
+      <span>Segment</span>
     </button>
     <button class="quick-tool" id="qt-flag" title="Visa och sök bland flaggor" aria-haspopup="true" aria-expanded="false">
       <svg width="20" height="20" aria-hidden="true"><use href="#icon-flag"></use></svg>
@@ -361,7 +433,7 @@
       <svg width="20" height="20" aria-hidden="true"><use href="#icon-crop"></use></svg>
       <span>Beskär</span>
     </button>
-    <button class="quick-tool" id="qt-transition" title="Lägg till övergång mellan klipp">
+    <button class="quick-tool" id="qt-transition" title="Markera exakt två video- eller bildklipp" disabled>
       <span class="transition-tool-icon" aria-hidden="true">◇</span>
       <span>Övergång</span>
     </button>
@@ -386,6 +458,31 @@
       <input id="canvas-height-slider" type="range" min="64" max="4096" step="16" value="1080">
     </label>
     <p class="canvas-size-hint">Format: <span id="canvas-size-summary">16:9 · 1920×1080</span></p>
+  </div>
+  <div id="segment-copy-popover" class="segment-copy-popover" hidden>
+    <div class="segment-popover-header">
+      <div>
+        <strong>Segmentbibliotek</strong>
+        <p id="segment-copy-status">Dra över tidslinjen för att markera IN och UT.</p>
+      </div>
+      <button id="close-segment-copy" class="segment-close" type="button" aria-label="Stäng" title="Stäng">×</button>
+    </div>
+    <button id="new-segment-button" class="new-segment-button" type="button" aria-expanded="false">＋ Nytt segment</button>
+    <div id="new-segment-form" class="new-segment-form" hidden>
+      <label for="segment-name">Namn på segment</label>
+      <input id="segment-name" type="text" maxlength="120" placeholder="Till exempel: Intro" autocomplete="off">
+      <small id="new-segment-meta">Aktuell markering saknas.</small>
+      <div class="new-segment-actions">
+        <button id="cancel-segment" type="button">Avbryt</button>
+        <button id="save-segment" type="button" disabled>Spara segment</button>
+      </div>
+    </div>
+    <div class="segment-list-heading"><strong>Sparade segment</strong><output id="segment-library-count">0 segment</output></div>
+    <div id="segment-library-list" class="segment-library-list" role="list" aria-label="Sparade segment"></div>
+    <div class="segment-copy-actions">
+      <button id="copy-segment" type="button" disabled>Kopiera till urklipp</button>
+      <button id="reset-segment" type="button">Ny markering</button>
+    </div>
   </div>
   <div id="flag-popover" class="flag-popover" hidden>
     <div class="flag-popover-header">
@@ -423,11 +520,33 @@
         <path d="M4 8V4h4" opacity=".75"/><path d="M20 8V4h-4" opacity=".75"/>
       </g>
     </symbol>
+    <symbol id="icon-transcription" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M2 12s3.8-7 10-7 10 7 10 7-3.8 7-10 7S2 12 2 12Z"/>
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M6.5 20.5h11" opacity=".65"/>
+      </g>
+    </symbol>
+    <symbol id="icon-still-frame" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="6" width="18" height="14" rx="2"/>
+        <path d="m8 6 1.5-2h5L16 6"/>
+        <circle cx="12" cy="13" r="4"/>
+        <path d="M18 9h.01"/>
+      </g>
+    </symbol>
     <symbol id="icon-split-playhead" viewBox="0 0 24 24">
       <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
         <path d="M12 3v18"/><path d="m9.5 3 2.5 3 2.5-3"/>
         <circle cx="6" cy="8" r="2.2"/><circle cx="6" cy="16" r="2.2"/>
         <path d="m8 9.1 8.5 4.7"/><path d="m8 14.9 8.5-4.7"/>
+      </g>
+    </symbol>
+    <symbol id="icon-segment-copy" viewBox="0 0 24 24">
+      <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 5v14M20 5v14"/><path d="M4 8h3M4 16h3M17 8h3M17 16h3"/>
+        <rect x="8" y="6" width="8" height="9" rx="1.5"/>
+        <path d="M10 15v3h7a2 2 0 0 0 2-2v-6h-3" opacity=".75"/>
       </g>
     </symbol>
     <symbol id="icon-delete" viewBox="0 0 24 24">
@@ -470,22 +589,13 @@
     </symbol>
   </svg>
 
-  <section class="transcript-search" aria-label="Sök i tidslinjens transkribering">
-    <label for="transcript-search-input">Sök i transkribering</label>
-    <input id="transcript-search-input" type="search" autocomplete="off" placeholder="Ett eller flera sökord">
-    <button id="transcript-search-previous" type="button" aria-label="Föregående träff" disabled>‹</button>
-    <button id="transcript-search-next" type="button" aria-label="Nästa träff" disabled>›</button>
-    <output id="transcript-search-status" aria-live="polite">Ingen transkribering indexerad</output>
-    <div id="transcript-search-results" class="transcript-search-results" role="listbox" aria-label="Sökträffar" hidden></div>
-  </section>
-
   <section class="timeline-container">
     <div class="timeline-body">
       <div class="track-labels">
         <div class="ruler-label"><span id="timecode">00:00.000</span></div>
         <div class="flag-label" aria-hidden="true"></div>
         <div class="track-label" id="visual-label">V1</div>
-        <div class="track-label" id="transcription-label"><button id="toggle-transcription" class="transcription-eye" title="Visa/dölj transkription i video" aria-label="Visa/dölj transkription i video"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button> TRANSKRIB.<input id="burn-transcription" type="checkbox" hidden></div>
+        <div class="track-label" id="transcription-label" hidden></div>
         <div class="track-label" id="audio-label">LJUD 1</div>
       </div>
       <div class="timeline-scroll" id="timeline-scroll">
@@ -493,9 +603,14 @@
           <div class="ruler" id="ruler"></div>
           <div class="flag-lane" id="flag-lane" aria-label="Flaggmarkeringar"></div>
           <div class="playhead" id="playhead"></div>
+          <div id="segment-selection" class="segment-selection" hidden aria-label="Markerat tidssegment">
+            <div id="segment-selection-fill" class="segment-selection-fill"></div>
+            <button id="segment-in-point" class="segment-point segment-in-point" type="button" aria-label="Segmentets startpunkt"><span>IN</span></button>
+            <button id="segment-out-point" class="segment-point segment-out-point" type="button" aria-label="Segmentets slutpunkt"><span>UT</span></button>
+          </div>
           <div id="snap-guide" class="snap-guide" aria-hidden="true" hidden></div>
           <div class="track visual-track" id="visual-track"></div>
-          <div class="track" id="transcription-track"></div>
+          <div class="track" id="transcription-track" hidden></div>
           <div class="track audio-track" id="audio-track"></div>
           <div id="timeline-link-connectors" class="timeline-link-connectors" aria-hidden="true"></div>
         </div>
@@ -510,25 +625,12 @@
   <div id="clip-context-menu" class="context-menu" role="menu" hidden>
     <button id="transcribe" type="button" role="menuitem">Transkribera</button>
     <button id="separate-from-audio" type="button" role="menuitem" hidden>Separera från ljud</button>
-    <button id="edit-transcription" type="button" role="menuitem" hidden>Redigera</button>
   </div>
 
   <div id="layer-context-menu" class="context-menu" role="menu" hidden>
     <span class="context-menu-title" id="layer-context-title"></span>
     <button id="layer-forward" type="button" role="menuitem" title="Flytta klippet ett steg framåt i lagret (högre lager)">Framåt i lager</button>
     <button id="layer-backward" type="button" role="menuitem" title="Flytta klippet ett steg bakåt i lagret (lägre lager)">Bakåt i lager</button>
-  </div>
-
-  <div id="transcription-edit-modal" class="modal" hidden>
-    <div class="modal-card">
-      <h2>Redigera transkription</h2>
-      <p id="transcription-edit-time" class="transcription-edit-time"></p>
-      <textarea id="transcription-edit-text" rows="6" class="transcription-edit-textarea" aria-label="Transkriptionstext"></textarea>
-      <div class="modal-actions">
-        <button id="save-transcription-edit" type="button">Spara</button>
-        <button id="close-transcription-edit" type="button">Avbryt</button>
-      </div>
-    </div>
   </div>
 
   <div id="flag-edit-modal" class="modal" hidden>
@@ -546,13 +648,34 @@
 
   <div id="export-modal" class="modal" hidden>
     <div class="modal-card">
-      <h2 id="export-title">Exporterar MP4</h2>
-      <progress id="export-progress" max="100" value="0"></progress>
-      <p id="export-message">Förbereder renderingen…</p>
-      <a id="download" class="download" hidden>Ladda ner MP4</a>
+      <h2 id="export-title">Exportera MP4</h2>
+      <div id="export-setup" class="export-setup">
+        <label>Output-mapp</label>
+        <div class="output-folder-row">
+          <output id="output-folder-path">Ingen mapp vald</output>
+          <button id="choose-output-folder" type="button">Välj mapp…</button>
+        </div>
+        <p>Den färdiga filen sparas direkt i den valda mappen.</p>
+      </div>
+      <progress id="export-progress" max="100" value="0" hidden></progress>
+      <p id="export-message">Välj output-mapp och starta exporten.</p>
       <div class="modal-actions">
+        <button id="start-export" type="button" disabled>Exportera</button>
         <button id="cancel-export" type="button" hidden>Avbryt</button>
         <button id="close-modal" type="button">Stäng</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="track-placement-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="track-placement-title" hidden>
+    <div class="modal-card track-placement-card">
+      <h2 id="track-placement-title">Välj spår</h2>
+      <p id="track-placement-summary">Välj var det importerade materialet ska läggas.</p>
+      <label class="transcribe-language-label" for="track-placement-select">Spår</label>
+      <select id="track-placement-select" class="transcribe-language-select"></select>
+      <div class="modal-actions">
+        <button id="confirm-track-placement" type="button">Placera</button>
+        <button id="cancel-track-placement" type="button">Avbryt</button>
       </div>
     </div>
   </div>

@@ -4,6 +4,7 @@
   if (root) root.TimelineModel = api;
 })(typeof window !== 'undefined' ? window : globalThis, function createTimelineModel() {
   const VISUAL = new Set(['video', 'image', 'text', 'blur', 'color', 'html']);
+  const TIME_EPSILON = 1e-7;
 
   function clipEnd(clip) {
     const start = Number(clip?.start) || 0;
@@ -12,7 +13,7 @@
   }
 
   function overlaps(startA, endA, startB, endB) {
-    return startA < endB && startB < endA;
+    return startA < endB - TIME_EPSILON && startB < endA - TIME_EPSILON;
   }
 
   function firstFreeTrack(clips, kinds, start, end, ignoreId = null) {
@@ -51,7 +52,7 @@
     ) || null;
   }
 
-  function compactTrackAssignments(clips, liftedIds = []) {
+  function compactTrackAssignments(clips, liftedIds = [], preserveTrackIndexes = false) {
     const liftedOrder = Array.isArray(liftedIds) ? liftedIds : (liftedIds ? [liftedIds] : []);
     const lifted = new Set(liftedOrder);
     const liftedRank = new Map(liftedOrder.map((id, index) => [id, index]));
@@ -75,18 +76,101 @@
       }
       if (!anyConflict) break;
     }
-    const usedVisualTracks = [...new Set(visual.map((clip) =>
-      Number.isFinite(clip.trackIndex) ? clip.trackIndex : 0
-    ))].sort((a, b) => a - b);
-    const denseTrackIndex = new Map(usedVisualTracks.map((trackIndex, index) => [trackIndex, index]));
-    for (const clip of visual) {
-      clip.trackIndex = denseTrackIndex.get(Number.isFinite(clip.trackIndex) ? clip.trackIndex : 0) || 0;
+    if (!preserveTrackIndexes) {
+      const usedVisualTracks = [...new Set(visual.map((clip) =>
+        Number.isFinite(clip.trackIndex) ? clip.trackIndex : 0
+      ))].sort((a, b) => a - b);
+      const denseTrackIndex = new Map(usedVisualTracks.map((trackIndex, index) => [trackIndex, index]));
+      for (const clip of visual) {
+        clip.trackIndex = denseTrackIndex.get(Number.isFinite(clip.trackIndex) ? clip.trackIndex : 0) || 0;
+      }
     }
     for (const clip of result) {
-      if (clip.kind === 'audio') clip.trackIndex = 0;
+      if (clip.kind === 'audio') {
+        clip.trackIndex = Number.isFinite(clip.trackIndex)
+          ? Math.max(0, Math.trunc(clip.trackIndex))
+          : 0;
+      }
     }
     return result;
   }
 
-  return { clipEnd, overlaps, firstFreeTrack, topActiveVisual, linkedPartner, compactTrackAssignments };
+  function cloneClip(clip) {
+    if (typeof structuredClone === 'function') return structuredClone(clip);
+    return JSON.parse(JSON.stringify(clip));
+  }
+
+  function sliceClipsToSegment(clips, pointA, pointB) {
+    const rangeStart = Math.max(0, Math.min(Number(pointA), Number(pointB)));
+    const rangeEnd = Math.max(0, Math.max(Number(pointA), Number(pointB)));
+    if (!Number.isFinite(rangeStart) || !Number.isFinite(rangeEnd) || rangeEnd - rangeStart <= TIME_EPSILON) return null;
+
+    const sliced = [];
+    for (const source of clips || []) {
+      const sourceStart = Number(source.start) || 0;
+      const sourceEnd = clipEnd(source);
+      const intersectionStart = Math.max(sourceStart, rangeStart);
+      const intersectionEnd = Math.min(sourceEnd, rangeEnd);
+      if (intersectionEnd - intersectionStart <= TIME_EPSILON) continue;
+
+      const clip = cloneClip(source);
+      const originalTrimStart = Number(source.trimStart) || 0;
+      clip.start = intersectionStart - rangeStart;
+      clip.trimStart = originalTrimStart + intersectionStart - sourceStart;
+      clip.trimEnd = originalTrimStart + intersectionEnd - sourceStart;
+      if (clip.transitionIn) {
+        const cut = Number(clip.transitionIn.cut);
+        const transitionWasTrimmed = intersectionStart > sourceStart + TIME_EPSILON;
+        if (!Number.isFinite(cut) || transitionWasTrimmed || cut > intersectionEnd + TIME_EPSILON) {
+          delete clip.transitionIn;
+        } else {
+          clip.transitionIn.cut = cut - rangeStart;
+        }
+      }
+      sliced.push(clip);
+    }
+    if (!sliced.length) return null;
+
+    const linkCounts = new Map();
+    for (const clip of sliced) {
+      if (clip.linkGroupId) linkCounts.set(clip.linkGroupId, (linkCounts.get(clip.linkGroupId) || 0) + 1);
+    }
+    for (const clip of sliced) {
+      if (clip.linkGroupId && linkCounts.get(clip.linkGroupId) < 2) delete clip.linkGroupId;
+      if (!clip.transitionIn) continue;
+      const cut = Number(clip.transitionIn.cut);
+      const outgoingIncluded = sliced.some((candidate) =>
+        candidate.id !== clip.id && VISUAL.has(candidate.kind) && Math.abs(clipEnd(candidate) - cut) <= TIME_EPSILON
+      );
+      if (!outgoingIncluded) delete clip.transitionIn;
+    }
+    return { duration: rangeEnd - rangeStart, clips: sliced };
+  }
+
+  function materializeSegmentClips(segment, destination, idFactory) {
+    if (!segment || !Array.isArray(segment.clips) || !segment.clips.length || typeof idFactory !== 'function') return [];
+    const base = Math.max(0, Number(destination) || 0);
+    const copies = segment.clips.map((source) => {
+      const clip = cloneClip(source);
+      clip.id = idFactory();
+      clip.name = `${source.name || 'Klipp'} (kopia)`;
+      clip.start = base + (Number(source.start) || 0);
+      if (clip.transitionIn && Number.isFinite(Number(clip.transitionIn.cut))) {
+        clip.transitionIn.cut = base + Number(clip.transitionIn.cut);
+      }
+      return clip;
+    });
+    const groupMap = new Map();
+    for (const clip of copies) {
+      if (!clip.linkGroupId) continue;
+      if (!groupMap.has(clip.linkGroupId)) groupMap.set(clip.linkGroupId, idFactory());
+      clip.linkGroupId = groupMap.get(clip.linkGroupId);
+    }
+    return copies;
+  }
+
+  return {
+    clipEnd, overlaps, firstFreeTrack, topActiveVisual, linkedPartner, compactTrackAssignments,
+    sliceClipsToSegment, materializeSegmentClips
+  };
 });

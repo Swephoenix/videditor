@@ -16,7 +16,7 @@ const ROOT = path.resolve(__dirname, '..');
 const id = `test-${crypto.randomUUID()}`;
 const fixtureName = `${id}.mp4`;
 const fixturePath = path.join(ROOT, 'uploads', fixtureName);
-const outputPath = path.join(ROOT, 'exports', `${id}.mp4`);
+const outputPath = path.join('/tmp', `${id}.mp4`);
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -125,7 +125,8 @@ async function waitForJob(job, timeoutMilliseconds = 20000) {
         trimEnd: 0.8,
         crop: { left: 0, right: 0, top: 0, bottom: 0 },
         muted: true,
-        trackIndex: 0
+        trackIndex: 0,
+        animOut: { type: 'fade', duration: 0.2 }
       },
       {
         media,
@@ -153,13 +154,18 @@ async function waitForJob(job, timeoutMilliseconds = 20000) {
     ]
   };
 
-  const job = { id, format: 'mp4', status: 'queued', progress: 0, createdAt: new Date().toISOString() };
+  const job = {
+    id, format: 'mp4', status: 'queued', progress: 0, createdAt: new Date().toISOString(),
+    outputDirectory: '/tmp', outputFileName: path.basename(outputPath), targetOutputPath: outputPath
+  };
   jobs.set(id, job);
   await renderProject(id, project);
   await waitForJob(job);
   assert(job.status === 'completed', job.error || `Oväntad jobbstatus: ${job.status}`);
   assert((await fsp.stat(outputPath)).size > 1000, 'Exportfilen är tom.');
-  assert(job.encoder.includes('CUDA/NVDEC') && job.encoder.includes('NVENC'), 'Exportjobbet använde inte NVIDIA GPU-vägen.');
+  assert(job.outputPath === outputPath, 'Exporten sparades inte direkt i den valda output-mappen.');
+  assert(job.decoder === 'FFmpeg', 'Exportjobbet använde inte stabil FFmpeg-avkodning.');
+  assert(job.encoder.includes('NVENC'), 'Exportjobbet använde inte NVIDIA-kodaren.');
 
   const exportedFrameRate = execFileSync('ffprobe', [
     '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=avg_frame_rate',

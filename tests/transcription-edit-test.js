@@ -87,38 +87,24 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     document.querySelector('#start-transcribe').click();
     await wait(150);
 
-    const transcriptClips = document.querySelectorAll('.clip.transcription');
-    console.log('Transkriptionsklipp:', transcriptClips.length, '(expect 2)');
-    if (transcriptClips.length !== 2) throw new Error(`Förväntade 2 transkriptionsklipp, fick ${transcriptClips.length}.`);
+    if (document.querySelectorAll('.clip.transcription').length !== 0) {
+      throw new Error('Transkriptionssegment renderas fortfarande på tidslinjen.');
+    }
 
-    // 1. Högerklick öppnar menyn med Redigera.
-    transcriptClips[0].dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 }));
-    const contextMenu = document.querySelector('#clip-context-menu');
-    const editBtn = document.querySelector('#edit-transcription');
-    console.log('Menyn öppen:', !contextMenu.hidden, '| Redigera synlig:', !editBtn.hidden);
-    if (contextMenu.hidden || editBtn.hidden) throw new Error('Högerklicksmenyn visar inte Redigera för transkription.');
-    editBtn.click();
-    const modal = document.querySelector('#transcription-edit-modal');
-    console.log('Redigeraren öppen:', !modal.hidden, '| tid:', document.querySelector('#transcription-edit-time').textContent);
-    if (modal.hidden) throw new Error('Redigeraren öppnades inte via menyn.');
-    const textarea = document.querySelector('#transcription-edit-text');
-    if (textarea.value !== 'Hej världen igen') throw new Error(`Fel text i redigeraren: ${textarea.value}`);
-
-    // 2. Ändra texten och spara.
-    textarea.value = 'Hej nya världen med fler ord';
+    // 1. Markera källjudet och redigera i den samlade högerpanelen.
+    audioClip.dispatchEvent(new window.MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 20, clientY: 20 }));
+    const panel = document.querySelector('#transcription-tools');
+    const textarea = document.querySelector('#transcription-editor-all');
+    if (panel.hidden || !textarea.value.includes('Hej världen igen')) {
+      throw new Error('Den samlade transkriptionspanelen öppnades inte för källjudet.');
+    }
+    textarea.value = textarea.value.replace('Hej världen igen', 'Hej nya världen med fler ord');
     textarea.dispatchEvent(new window.Event('input', { bubbles: true }));
-    document.querySelector('#save-transcription-edit').click();
+    document.querySelector('#save-all-transcription').click();
     await wait(50);
-    console.log('Redigeraren stängd efter spara:', modal.hidden);
-    if (!modal.hidden) throw new Error('Redigeraren stängdes inte efter spara.');
+    if (!textarea.value.includes('Hej nya världen med fler ord')) throw new Error('Paneltexten uppdaterades inte efter spara.');
 
-    // 3. Kontrollera att segmentet och klippet uppdaterades.
-    const freshClips = document.querySelectorAll('.clip.transcription');
-    const firstText = freshClips[0].querySelector('.transcription-text').textContent;
-    console.log('Klipptext efter spara:', firstText);
-    if (firstText !== 'Hej nya världen med fler ord') throw new Error(`Klipptexten uppdaterades inte: ${firstText}`);
-
-    // 4. Sök efter nytt ord ska fungera (index uppdaterad).
+    // 2. Sök efter nytt ord ska fungera (index uppdaterad).
     const search = document.querySelector('#transcript-search-input');
     search.value = 'nya';
     search.dispatchEvent(new window.Event('input', { bubbles: true }));
@@ -126,7 +112,7 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     console.log('Sökträffar på "nya":', results.length, '(expect 1)');
     if (results.length !== 1) throw new Error(`Sökning efter nytt ord gav ${results.length} träffar.`);
 
-    // 5. Overlay-texten ska använda nya ord (ordtidskoder genererade).
+    // 3. Overlay-texten ska använda nya ord (ordtidskoder genererade).
     const wordsInput = document.querySelector('#transcript-words');
     wordsInput.value = '20';
     wordsInput.dispatchEvent(new window.Event('input', { bubbles: true }));
@@ -142,13 +128,11 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     console.log('Overlay-text:', overlay.textContent.trim(), '(innehåller "nya")');
     if (!overlay.textContent.includes('nya')) throw new Error('Overlayn använder inte de redigerade orden.');
 
-    // 6. Spara igen med oförändrad text stänger bara (ingen krasch).
-    const fresh2 = document.querySelectorAll('.clip.transcription');
-    fresh2[0].dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 }));
-    document.querySelector('#edit-transcription').click();
-    document.querySelector('#save-transcription-edit').click();
-    console.log('Oförändrad spara OK, modal stängd:', modal.hidden);
-    if (!modal.hidden) throw new Error('Oförändrad spara stängde inte modalen.');
+    // 4. Oförändrad spara ska vara ofarlig.
+    document.querySelector('#save-all-transcription').click();
+    if (!document.querySelector('#transcription-copy-status').textContent.includes('Inga ändringar')) {
+      throw new Error('Oförändrad spara rapporterades inte korrekt.');
+    }
 
     console.log('DONE');
     process.exit(0);
