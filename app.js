@@ -4124,10 +4124,12 @@ function selectClips(ids, primaryId = null, options = {}) {
       state.selectedTranscriptionSegmentIndex = transcriptionSegmentForSourceClip(transcriptionSource);
     }
   }
+  let selectionMovedPlayhead = false;
   if (!options.preventPlayheadJump && !editorHistory.restoring && selectionChanged &&
       (clip?.kind === 'blur' || clip?.kind === 'color' || clip?.kind === 'html') &&
       (state.playhead < clip.start || state.playhead >= clip.start + clipDuration(clip))) {
     state.playhead = clip.start;
+    selectionMovedPlayhead = true;
   }
   elements.info.textContent = validIds.size > 1
     ? `${validIds.size} klipp markerade · ${describeClip(clip)}`
@@ -4156,7 +4158,7 @@ function selectClips(ids, primaryId = null, options = {}) {
   const anyTools = transcriptionSelected || (clip && (clip.kind === 'video' || clip.kind === 'image' || clip.kind === 'blur' || clip.kind === 'color' || clip.kind === 'text' || clip.kind === 'html' || clip.kind === 'audio'));
   elements.toolsPanel.hidden = !anyTools;
   if (elements.toolsPanelResizer) elements.toolsPanelResizer.hidden = !anyTools;
-  if (options.refreshPreview !== false) setPlayhead(state.playhead);
+  if (options.refreshPreview !== false) setPlayhead(state.playhead, true, selectionMovedPlayhead);
 }
 
 function selectClip(id) {
@@ -6248,8 +6250,12 @@ function synchronizeMediaElementTime(element, targetTime, onReady = null) {
 
 function playMediaElementWhenReady(element) {
   if (!state.playing || !element) return;
-  if ((!element.paused && !element.ended) || element._playbackRetryPending) return;
-  if (element.ended) element.pause();
+  if (element.ended) {
+    element._playbackRetryPending = false;
+    element.pause();
+    return;
+  }
+  if (!element.paused || element._playbackRetryPending) return;
   const attempt = () => {
     if (!state.playing || !element.paused) {
       element._playbackRetryPending = false;
@@ -6513,7 +6519,10 @@ function togglePlayback() {
   if (state.playing) return stopPlayback();
   const end = projectEnd();
   if (end <= 0) return alert('Ladda upp minst ett klipp först.');
-  if (state.playhead >= end - 0.01) setPlayhead(0);
+  if (state.playhead >= end - 0.01) {
+    setPlayhead(end);
+    return;
+  }
   state.playing = true;
   state.playbackEnd = end;
   state.playbackOrigin = state.playhead;
@@ -6664,7 +6673,7 @@ function syncPlaybackMedia(time) {
   }
 }
 
-function setPlayhead(seconds, updatePreview = true) {
+function setPlayhead(seconds, updatePreview = true, followIntoView = true) {
   state.playhead = Math.max(0, seconds);
   if (updatePreview) updateTimelineWidth();
   elements.playhead.style.left = `${secondsToPixels(state.playhead)}px`;
@@ -6672,7 +6681,7 @@ function setPlayhead(seconds, updatePreview = true) {
   elements.timecode.textContent = formatTime(state.playhead);
   updateTranscriptionPlayheadHighlight();
   if (editorHistory.clipboard) renderProgramClipboard();
-  followPlayheadIntoView();
+  if (followIntoView) followPlayheadIntoView();
   if (!updatePreview) return;
   const p = state.playhead;
   const base = timelineModel.topActiveVisual(state.clips, p);

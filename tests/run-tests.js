@@ -37,6 +37,7 @@ const tests = [
   'split-all-at-playhead-test.js',
   'zoom-out-fit-test.js',
   'playhead-follow-test.js',
+  'clip-selection-scroll-test.js',
   'dragbar-test.js',
   'video-thumbs-test.js',
   'waveform-queue-test.js',

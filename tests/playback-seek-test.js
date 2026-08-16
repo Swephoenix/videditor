@@ -32,7 +32,7 @@ Object.defineProperties(window.HTMLMediaElement.prototype, {
   readyState: { configurable: true, get() { return this._testReadyState ?? 4; } },
   seeking: { configurable: true, get() { return this._testSeeking === true; } },
   paused: { configurable: true, get() { return this._testPaused !== false; } },
-  ended: { configurable: true, get() { return false; } }
+  ended: { configurable: true, get() { return this._testEnded === true; } }
 });
 window.HTMLMediaElement.prototype.pause = function pause() { this._testPaused = true; };
 window.HTMLMediaElement.prototype.play = function play() {
@@ -53,7 +53,7 @@ window.fetch = async (url) => ({
 });
 
 window.eval(timelineModelJs);
-window.eval(`${appJs}\nwindow.__playbackTest = { state, syncPlaybackMedia, renderLayerMedia, playbackTick };`);
+window.eval(`${appJs}\nwindow.__playbackTest = { state, syncPlaybackMedia, renderLayerMedia, playbackTick, togglePlayback, stopPlayback, playMediaElementWhenReady };`);
 
 function audioClip() {
   return {
@@ -155,5 +155,44 @@ assert.strictEqual(
   bufferingBoundary,
   'Playheaden ska stå stabilt inne i videoklippet medan samma video buffrar.'
 );
+
+// Reaching the timeline end must stop there. Pressing Play again at the exact
+// end must not silently loop the project back to zero.
+preview._testReadyState = 4;
+preview._testSeeking = false;
+window.__playbackTest.state.clips = [{ ...videoClip(), trimEnd: 10, mediaDuration: 10 }];
+window.__playbackTest.state.playing = true;
+window.__playbackTest.state.playbackEnd = 10;
+window.__playbackTest.state.playbackOrigin = 9.9;
+window.__playbackTest.state.playbackStartedAt = 0;
+window.__playbackTest.state.playhead = 9.9;
+window.__playbackTest.playbackTick(200);
+assert.strictEqual(window.__playbackTest.state.playing, false, 'Uppspelningen stoppades inte vid projektets slut.');
+assert.strictEqual(window.__playbackTest.state.playhead, 10, 'Playheaden ska lämnas på projektets sluttid.');
+
+window.__playbackTest.togglePlayback();
+assert.strictEqual(window.__playbackTest.state.playing, false, 'Play vid sluttiden startade en ny loop.');
+assert.strictEqual(window.__playbackTest.state.playhead, 10, 'Play vid sluttiden hoppade tillbaka till början.');
+
+window.__playbackTest.state.playhead = 9.98;
+window.__playbackTest.togglePlayback();
+assert.strictEqual(window.__playbackTest.state.playing, true, 'Play strax före sluttiden blockerades av slutskyddet.');
+assert(
+  window.__playbackTest.state.playhead >= 9.98 && window.__playbackTest.state.playhead < 10,
+  'Play strax före slutet lämnade det återstående uppspelningsintervallet.'
+);
+window.__playbackTest.stopPlayback();
+
+// A media element can report ended just before the timeline clock catches up;
+// the readiness helper must not restart that element from source time zero.
+const endedPlayer = window.document.createElement('video');
+endedPlayer._testPaused = true;
+endedPlayer._testEnded = true;
+let endedPlayCalls = 0;
+endedPlayer.play = () => { endedPlayCalls += 1; return Promise.resolve(); };
+window.__playbackTest.state.playing = true;
+window.__playbackTest.playMediaElementWhenReady(endedPlayer);
+assert.strictEqual(endedPlayCalls, 0, 'Ett avslutat mediaelement startades om från början.');
+window.__playbackTest.stopPlayback();
 
 console.log(`PLAYBACK SEEK OK · 200 sync-varv ${elapsedMs.toFixed(1)} ms · ${player._testSeekWrites} kontrollerade seeks`);
