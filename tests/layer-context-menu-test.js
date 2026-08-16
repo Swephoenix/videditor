@@ -118,7 +118,9 @@ setTimeout(() => {
       importFile('video2.mp4');
       setTimeout(() => {
         const c2 = findVideoClip('video2.mp4');
-        if (!c2) throw new Error('video2 hittades inte.');
+        const c1 = findVideoClip('video1.mp4');
+        if (!c1 || !c2) throw new Error('Videoklippen hittades inte.');
+        dragClipToStart(c1.clip, 0);
         dragClipToStart(c2.clip, 0);
         scrubTo(0.5);
         setTimeout(() => {

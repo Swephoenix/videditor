@@ -45,7 +45,10 @@ window.fetch = async (url, opts) => {
   return makeResponse({});
 };
 
-try { window.eval(timelineModelJs); window.eval(appJs); } catch (e) { console.log('SCRIPT ERROR:', e.message, e.stack); process.exit(1); }
+try {
+  window.eval(timelineModelJs);
+  window.eval(`${appJs}\nwindow.__zoomTest = { state, renderAllClips, updateTimelineWidth };`);
+} catch (e) { console.log('SCRIPT ERROR:', e.message, e.stack); process.exit(1); }
 
 const timeline = document.querySelector('#timeline-tracks');
 const scroll = document.querySelector('#timeline-scroll');
@@ -108,12 +111,25 @@ setTimeout(() => {
         if (scaleAfterZoomIn <= scale + 0.01) throw new Error('Det går inte att zooma in igen efter max-utzoomning.');
 
         // 3. Long project: import many clips so duration grows to ~190s.
-        const imports = [];
-        for (let i = 0; i < 10; i += 1) imports.push(new Promise((resolve) => {
-          importFile('video1.mp4');
-          setTimeout(resolve, 60);
-        }));
-        Promise.all(imports).then(() => {
+        let imports = Promise.resolve();
+        for (let i = 0; i < 10; i += 1) {
+          imports = imports.then(() => new Promise((resolve) => {
+            importFile('video1.mp4');
+            setTimeout(resolve, 60);
+          }));
+        }
+        imports.then(() => {
+          let cursor = 0;
+          for (const clip of window.__zoomTest.state.clips.filter((item) => item.kind === 'video')) {
+            clip.start = cursor;
+            const linkedAudio = window.__zoomTest.state.clips.find((item) =>
+              item.kind === 'audio' && item.linkGroupId && item.linkGroupId === clip.linkGroupId
+            );
+            if (linkedAudio) linkedAudio.start = cursor;
+            cursor += clip.trimEnd - clip.trimStart;
+          }
+          window.__zoomTest.renderAllClips();
+          window.__zoomTest.updateTimelineWidth();
           const longDuration = Number(timeline.dataset.duration);
           console.log('Long project duration:', longDuration, 's');
           if (longDuration < 110) throw new Error('Det långa projektet borde vara > 110 s.');

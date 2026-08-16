@@ -75,6 +75,8 @@ setTimeout(() => {
       videoInput.files = [{ name: 'video2.mp4' }];
       videoInput.dispatchEvent(new window.Event('change'));
       setTimeout(() => {
+        // Låt den automatiska ljudsepareringen bli klar innan idempotensen provas.
+        setTimeout(() => {
         const visualTracks = document.querySelectorAll('.track.visual-track');
         const audioTracks = document.querySelectorAll('.track.audio-track');
         console.log('After 2 video uploads:');
@@ -86,7 +88,7 @@ setTimeout(() => {
 
         // Separera igen får inte skapa en dubblerad ljudkopia ovanpå det länkade ljudet.
         const vidClips = [...document.querySelectorAll('.clip.video')];
-        vidClips[1].dispatchEvent(new window.Event('click'));
+        vidClips[1].dispatchEvent(new window.MouseEvent('mousedown', { bubbles: true, button: 0 }));
         document.querySelector('#separate-audio').dispatchEvent(new window.Event('click'));
         setTimeout(() => {
           const audioClips = document.querySelectorAll('.clip.audio');
@@ -113,6 +115,7 @@ setTimeout(() => {
              process.exit(0);
           }, 200);
          }, 200);
+        }, 200);
       }, 200);
    }, 200);
   } catch (e) {

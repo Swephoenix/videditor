@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { JSDOM } = require('jsdom');
+const { installDomStubs } = require('./jsdom-helpers');
 
 const ROOT = path.resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
@@ -16,6 +17,7 @@ const dom = new JSDOM(html, {
 });
 const { window } = dom;
 const { document } = window;
+installDomStubs(window);
 
 window.crypto = window.crypto || {};
 if (!window.crypto.randomUUID) window.crypto.randomUUID = () => `id-${Math.random().toString(36).slice(2)}`;
@@ -23,12 +25,6 @@ window.requestAnimationFrame = (callback) => setTimeout(() => callback(Date.now(
 window.CSS = window.CSS || {};
 window.CSS.escape = (value) => value;
 window.alert = (message) => { throw new Error(`Oväntad dialog: ${message}`); };
-window.HTMLCanvasElement.prototype.getContext = () => new Proxy({}, {
-  get: (_target, property) => property === 'measureText' ? (() => ({ width: 0 })) : (() => {}),
-  set: () => true
-});
-window.HTMLMediaElement.prototype.pause = () => {};
-window.HTMLMediaElement.prototype.play = async () => {};
 if (!window.structuredClone) window.structuredClone = (value) => JSON.parse(JSON.stringify(value));
 Object.defineProperty(window.HTMLInputElement.prototype, 'files', {
   configurable: true,

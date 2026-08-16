@@ -41,6 +41,8 @@ const MAX_AUDIO_TASKS = 2;
 const AUDIO_TASK_TIMEOUT_MS = 30 * 60 * 1000;
 const EXPORT_SAFETY_BYTES = 512 * 1024 * 1024;
 const OUTPUT_DIRECTORY_TTL_MS = 12 * 60 * 60 * 1000;
+const MEDIA_METADATA_VERSION = 2;
+const WAVEFORM_OVERSAMPLE = 16;
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tif', '.tiff', '.svg']);
 const ALLOWED_EXTENSIONS = new Set([
   '.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v',
@@ -75,6 +77,44 @@ let activeOutputDirectoryPicker = null;
 let librarySaveQueue = Promise.resolve();
 let audioAnalysisSaveQueue = Promise.resolve();
 let activeAudioTasks = 0;
+
+class BoundedLruCache {
+  constructor({ maxEntries, maxBytes }) {
+    this.maxEntries = maxEntries;
+    this.maxBytes = maxBytes;
+    this.entries = new Map();
+    this.totalBytes = 0;
+  }
+
+  get size() { return this.entries.size; }
+  has(key) { return this.entries.has(key); }
+
+  get(key) {
+    const entry = this.entries.get(key);
+    if (!entry) return undefined;
+    this.entries.delete(key);
+    this.entries.set(key, entry);
+    return entry.value;
+  }
+
+  set(key, value, byteSize = Buffer.isBuffer(value) ? value.length : Buffer.byteLength(JSON.stringify(value))) {
+    const size = Math.max(0, Number(byteSize) || 0);
+    if (this.entries.has(key)) {
+      this.totalBytes -= this.entries.get(key).size;
+      this.entries.delete(key);
+    }
+    if (size > this.maxBytes) return false;
+    this.entries.set(key, { value, size });
+    this.totalBytes += size;
+    while (this.entries.size > this.maxEntries || this.totalBytes > this.maxBytes) {
+      const oldestKey = this.entries.keys().next().value;
+      const oldest = this.entries.get(oldestKey);
+      this.entries.delete(oldestKey);
+      this.totalBytes -= oldest.size;
+    }
+    return true;
+  }
+}
 
 function badRequest(message) {
   const error = new Error(message);
@@ -254,12 +294,17 @@ function mediaFilePath(item) {
 }
 
 async function registerExternalMedia(filePath) {
-  const absolutePath = path.resolve(filePath);
+  const absolutePath = await fsp.realpath(path.resolve(filePath));
   const stat = await fsp.stat(absolutePath);
   if (!stat.isFile()) throw badRequest('Den valda sökvägen är inte en fil.');
   if (stat.size > MAX_UPLOAD_BYTES) throw badRequest('Filen är för stor.');
   const extension = path.extname(absolutePath).toLowerCase();
   if (!ALLOWED_EXTENSIONS.has(extension)) throw badRequest('Filtypen stöds inte.');
+  for (const existing of mediaLibrary.values()) {
+    if (!existing.sourcePath) continue;
+    const existingPath = await fsp.realpath(existing.sourcePath).catch(() => path.resolve(existing.sourcePath));
+    if (existingPath === absolutePath) return existing;
+  }
   const metadata = await probeMedia(absolutePath, extension);
   const item = {
     id: crypto.randomUUID(),
@@ -321,6 +366,7 @@ async function registerProcessedAudio(source, outputPath, id, suffix, operation)
     rotation: 0,
     videoCodec: null,
     audioCodec: metadata.audioCodec,
+    metadataVersion: MEDIA_METADATA_VERSION,
     processedFrom: source.id,
     audioOperation: operation
   };
@@ -359,6 +405,69 @@ function runProcessBuffer(command, args, options = {}) {
   });
 }
 
+function probePacketTimelineDuration(filePath, streamSpecifier) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('ffprobe', [
+      '-v', 'error', '-select_streams', streamSpecifier,
+      '-show_entries', 'packet=pts_time,duration_time', '-of', 'csv=p=0', filePath
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let remainder = '';
+    let stderr = '';
+    let firstTimestamp = Infinity;
+    let previousTimestamp = null;
+    let lastTimestamp = -Infinity;
+    let maximumEnd = -Infinity;
+    const recentDeltas = [];
+    let settled = false;
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      callback();
+    };
+    const parseLine = (line) => {
+      const [timestampText, durationText] = line.trim().split(',');
+      const timestamp = Number(timestampText);
+      const packetDuration = Number(durationText);
+      if (!Number.isFinite(timestamp)) return;
+      firstTimestamp = Math.min(firstTimestamp, timestamp);
+      lastTimestamp = Math.max(lastTimestamp, timestamp);
+      if (previousTimestamp !== null) {
+        const delta = timestamp - previousTimestamp;
+        if (delta > 0 && delta < 10) {
+          recentDeltas.push(delta);
+          if (recentDeltas.length > 31) recentDeltas.shift();
+        }
+      }
+      previousTimestamp = timestamp;
+      maximumEnd = Math.max(maximumEnd, timestamp + (packetDuration > 0 ? packetDuration : 0));
+    };
+    child.stdout.on('data', (chunk) => {
+      const lines = (remainder + chunk.toString()).split(/\r?\n/);
+      remainder = lines.pop() || '';
+      lines.forEach(parseLine);
+    });
+    child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString()).slice(-2000); });
+    child.on('error', (error) => finish(() => reject(error)));
+    child.on('close', (code) => finish(() => {
+      if (remainder) parseLine(remainder);
+      if (code !== 0) {
+        reject(new Error(`ffprobe avslutades med kod ${code}: ${stderr}`));
+        return;
+      }
+      const sortedDeltas = recentDeltas.slice().sort((a, b) => a - b);
+      const typicalDelta = sortedDeltas.length ? sortedDeltas[Math.floor(sortedDeltas.length / 2)] : 0;
+      const timelineEnd = Math.max(maximumEnd, lastTimestamp + typicalDelta);
+      const duration = timelineEnd - firstTimestamp;
+      resolve(Number.isFinite(duration) && duration > 0 ? duration : null);
+    }));
+    const timeout = setTimeout(() => {
+      child.kill('SIGKILL');
+      finish(() => reject(new Error('Tidsanalysen tog för lång tid.')));
+    }, 30_000);
+  });
+}
+
 function waveformPeaksFromPcm(buffer, width) {
   const sampleCount = Math.floor(buffer.length / 4);
   const peaks = new Float32Array(Math.max(1, width));
@@ -370,6 +479,69 @@ function waveformPeaksFromPcm(buffer, width) {
     if (amplitude > peaks[peakIndex]) peaks[peakIndex] = amplitude;
   }
   return peaks;
+}
+
+function waveformSampleRate(duration, width) {
+  const seconds = Math.max(0.001, Number(duration) || 0.001);
+  const pixels = Math.max(32, Math.min(2000, Math.round(Number(width) || 400)));
+  return Math.max(32, Math.min(2000, Math.ceil((pixels * WAVEFORM_OVERSAMPLE) / seconds)));
+}
+
+function resampleWaveformPeaks(peaks, width) {
+  const source = Array.from(peaks || [], Number);
+  const targetLength = Math.max(1, Math.round(Number(width) || 1));
+  if (source.length === targetLength) return source.slice();
+  const target = new Array(targetLength).fill(0);
+  for (let index = 0; index < source.length; index += 1) {
+    const targetIndex = Math.min(targetLength - 1, Math.floor(index * targetLength / source.length));
+    target[targetIndex] = Math.max(target[targetIndex], source[index] || 0);
+  }
+  return target;
+}
+
+function chooseThumbnailStrategy(duration, count) {
+  const seconds = Math.max(0, Number(duration) || 0);
+  const frames = Math.max(1, Number(count) || 1);
+  return seconds <= 60 && seconds / frames <= 8 ? 'single-input' : 'multi-seek';
+}
+
+async function sha256File(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+async function filesHaveSameContent(firstPath, secondPath) {
+  const [firstStat, secondStat] = await Promise.all([fsp.stat(firstPath), fsp.stat(secondPath)]);
+  if (firstStat.size !== secondStat.size) return false;
+  const [firstHash, secondHash] = await Promise.all([sha256File(firstPath), sha256File(secondPath)]);
+  return firstHash === secondHash;
+}
+
+async function findDuplicateUpload(file) {
+  const originalName = path.basename(file.originalname || '').slice(0, 200);
+  const candidates = [...mediaLibrary.values()].filter((item) =>
+    !item.sourcePath && item.storedName && Number(item.size) === Number(file.size)
+      && (item.contentHash || item.name === originalName)
+  );
+  if (!candidates.length) return null;
+  const incomingHash = await sha256File(file.path);
+  for (const candidate of candidates) {
+    let candidatePath;
+    try { candidatePath = mediaFilePath(candidate); } catch (_error) { continue; }
+    const candidateHash = candidate.contentHash || await sha256File(candidatePath);
+    if (candidateHash !== incomingHash) continue;
+    if (candidate.contentHash !== candidateHash) {
+      mediaLibrary.set(candidate.id, { ...candidate, contentHash: candidateHash });
+      await saveLibrary();
+    }
+    return mediaLibrary.get(candidate.id);
+  }
+  return null;
 }
 
 function probeSvg(filePath) {
@@ -395,7 +567,8 @@ function probeSvg(filePath) {
   return {
     kind: 'image', duration: 5, hasVideo: true, hasAudio: false,
     width: Math.round(width), height: Math.round(height),
-    rotation: 0, videoCodec: 'svg', audioCodec: null
+    rotation: 0, videoCodec: 'svg', audioCodec: null, hasAlpha: true,
+    metadataVersion: MEDIA_METADATA_VERSION
   };
 }
 
@@ -403,15 +576,18 @@ async function probeMedia(filePath, extension) {
   if (extension === '.svg') return probeSvg(filePath);
   const { stdout } = await runProcess('ffprobe', [
     '-v', 'error', '-show_entries',
-    'format=duration:stream=index,codec_type,codec_name,width,height,duration,avg_frame_rate,r_frame_rate:' +
-    'stream_tags=rotate:stream_side_data=rotation',
+    'format=duration:stream=index,codec_type,codec_name,pix_fmt,width,height,duration,avg_frame_rate,r_frame_rate:' +
+    'stream_tags=rotate,alpha_mode:stream_side_data=rotation',
     '-of', 'json', filePath
   ]);
   const result = JSON.parse(stdout);
   const video = result.streams?.find((stream) => stream.codec_type === 'video');
   const audio = result.streams?.find((stream) => stream.codec_type === 'audio');
   const isImage = IMAGE_EXTENSIONS.has(extension);
-  const duration = Number(result.format?.duration || video?.duration || audio?.duration);
+  let duration = Number(result.format?.duration || video?.duration || audio?.duration);
+  if (!isImage && (!Number.isFinite(duration) || duration <= 0)) {
+    duration = await probePacketTimelineDuration(filePath, video ? 'v:0' : 'a:0');
+  }
   if ((!video && !audio) || (!isImage && (!Number.isFinite(duration) || duration <= 0))) {
     throw badRequest('Filen innehåller ingen användbar video eller ljudström.');
   }
@@ -423,6 +599,7 @@ async function probeMedia(filePath, extension) {
   const swapsDimensions = rotation === 90 || rotation === 270;
   const encodedWidth = Number(video?.width || 0);
   const encodedHeight = Number(video?.height || 0);
+  const pixelFormatHasAlpha = /^(?:yuva|rgba|bgra|argb|abgr|gbrap|ya)/i.test(video?.pix_fmt || '');
   return {
     kind: isImage ? 'image' : (video ? 'video' : 'audio'),
     duration: isImage ? 5 : duration,
@@ -433,14 +610,20 @@ async function probeMedia(filePath, extension) {
     rotation,
     frameRate: isImage ? null : (parseFrameRate(video?.avg_frame_rate) ?? parseFrameRate(video?.r_frame_rate)),
     videoCodec: video?.codec_name || null,
-    audioCodec: audio?.codec_name || null
+    audioCodec: audio?.codec_name || null,
+    hasAlpha: Boolean(video && (String(video.tags?.alpha_mode || '') === '1' || pixelFormatHasAlpha)),
+    metadataVersion: MEDIA_METADATA_VERSION
   };
+}
+
+function mediaMetadataNeedsRefresh(item) {
+  return item?.kind === 'video' && item.metadataVersion !== MEDIA_METADATA_VERSION;
 }
 
 async function refreshLegacyVideoMetadata() {
   let changed = false;
   for (const [id, item] of mediaLibrary) {
-    if (item.kind !== 'video' || (Number.isFinite(item.rotation) && Number.isFinite(item.frameRate))) continue;
+    if (!mediaMetadataNeedsRefresh(item)) continue;
     try {
       const filePath = mediaFilePath(item);
       const metadata = await probeMedia(filePath, path.extname(item.storedName).toLowerCase());
@@ -448,6 +631,8 @@ async function refreshLegacyVideoMetadata() {
       changed = true;
     } catch (error) {
       console.warn(`Kunde inte uppdatera metadata för ${item.name}:`, error.message);
+      mediaLibrary.set(id, { ...item, metadataVersion: MEDIA_METADATA_VERSION, metadataProbeError: error.message });
+      changed = true;
     }
   }
   if (changed) await saveLibrary();
@@ -465,6 +650,11 @@ async function hasWorkingNvenc(force = false) {
 function appendMediaInputArgs(args, clip, inputPath, frameRate = 30) {
   const length = Math.max(0.001, Number(clip.trimEnd) - Number(clip.trimStart));
   if (clip.kind === 'image') args.push('-loop', '1', '-framerate', formatFrameRate(frameRate));
+  const inputExtension = path.extname(inputPath).toLowerCase();
+  if (clip.kind === 'video' && clip.media?.hasAlpha && inputExtension === '.webm') {
+    if (clip.media.videoCodec === 'vp9') args.push('-c:v', 'libvpx-vp9');
+    if (clip.media.videoCodec === 'vp8') args.push('-c:v', 'libvpx');
+  }
   if (clip.kind === 'video' || clip.kind === 'audio') {
     args.push('-ss', Number(clip.trimStart).toFixed(3), '-t', length.toFixed(3));
   }
@@ -534,6 +724,12 @@ app.post('/api/media', upload.single('media'), async (request, response, next) =
   if (!request.file) return response.status(400).json({ error: 'Ingen fil skickades.' });
   let item = null;
   try {
+    const duplicate = await findDuplicateUpload(request.file);
+    if (duplicate) {
+      await fsp.unlink(request.file.path);
+      response.status(200).json({ ...duplicate, deduplicated: true });
+      return;
+    }
     const extension = path.extname(request.file.originalname).toLowerCase();
     const metadata = await probeMedia(request.file.path, extension);
     item = {
@@ -592,6 +788,8 @@ app.get('/api/media/:id/file', (request, response) => {
   }
 });
 
+const waveformCache = new BoundedLruCache({ maxEntries: 128, maxBytes: 16 * 1024 * 1024 });
+
 app.get('/api/media/:id/waveform', async (request, response, next) => {
   try {
     const { item, filePath } = requireAudioMedia(request.params.id);
@@ -601,26 +799,38 @@ app.get('/api/media/:id/waveform', async (request, response, next) => {
     const end = clamp(Number.isFinite(requestedEnd) ? requestedEnd : (item.duration || MAX_DURATION), start, item.duration || MAX_DURATION);
     const duration = end - start;
     if (duration <= 0) throw badRequest('Waveformens intervall är tomt.');
-    const sampleRate = 2000;
-    const result = await withAudioTask(() => runProcessBuffer('ffmpeg', [
-      '-hide_banner', '-loglevel', 'error',
-      '-ss', String(start), '-i', filePath, '-t', String(duration),
-      '-vn', '-ac', '1', '-ar', String(sampleRate), '-f', 'f32le', 'pipe:1'
-    ], { timeout: AUDIO_TASK_TIMEOUT_MS, killSignal: 'SIGKILL' }));
-    const peaks = waveformPeaksFromPcm(result.buffer, width);
-    const maxPeak = peaks.reduce((max, peak) => Math.max(max, peak), 0) || 1;
-    response.json({
-      peaks: Array.from(peaks, (peak) => Math.min(1, peak / maxPeak)),
-      duration,
-      sampleRate
-    });
+    const cacheKey = `${item.id}:${start.toFixed(3)}:${end.toFixed(3)}`;
+    let analysis = waveformCache.get(cacheKey);
+    if (!analysis) {
+      const analysisWidth = 2000;
+      const sampleRate = waveformSampleRate(duration, analysisWidth);
+      const result = await withAudioTask(() => runProcessBuffer('ffmpeg', [
+        '-hide_banner', '-loglevel', 'error',
+        '-ss', String(start), '-i', filePath, '-t', String(duration),
+        '-vn', '-ac', '1', '-ar', String(sampleRate), '-f', 'f32le', 'pipe:1'
+      ], { timeout: AUDIO_TASK_TIMEOUT_MS, killSignal: 'SIGKILL' }));
+      const peaks = waveformPeaksFromPcm(result.buffer, analysisWidth);
+      const maxPeak = peaks.reduce((max, peak) => Math.max(max, peak), 0) || 1;
+      analysis = {
+        peaks: Array.from(peaks, (peak) => Math.min(1, peak / maxPeak)),
+        duration,
+        sampleRate
+      };
+      waveformCache.set(cacheKey, analysis, analysis.peaks.length * 8 + 64);
+    }
+    const payload = {
+      peaks: resampleWaveformPeaks(analysis.peaks, width),
+      duration: analysis.duration,
+      sampleRate: analysis.sampleRate
+    };
+    response.json(payload);
   } catch (error) {
     if (!error.status) error.status = 400;
     next(error);
   }
 });
 
-const thumbnailCache = new Map();
+const thumbnailCache = new BoundedLruCache({ maxEntries: 96, maxBytes: 96 * 1024 * 1024 });
 let activeThumbTasks = 0;
 const MAX_THUMB_TASKS = 4;
 
@@ -671,17 +881,23 @@ app.get('/api/media/:id/thumbs', async (request, response, next) => {
       positions.push(Math.min(t, Math.max(0, end - 0.1)).toFixed(3));
     }
     const args = ['-hide_banner', '-loglevel', 'error', '-y'];
-    for (const t of positions) args.push('-ss', t, '-i', filePath);
-    const scaleChains = positions.map((_, i) =>
-      `[${i}:v]scale=${frameWidth}:-2:flags=lanczos[v${i}]`
-    );
-    const stack = `[v0]${positions.slice(1).map((_, i) => `[v${i + 1}]`).join('')}hstack=inputs=${positions.length}`;
-    args.push('-filter_complex', `${scaleChains.join(';')};${stack}`);
+    const strategy = chooseThumbnailStrategy(end - start, count);
+    if (strategy === 'single-input') {
+      args.push('-ss', String(start), '-i', filePath, '-t', String(end - start));
+      args.push('-vf', `fps=${count}/${end - start}:start_time=0,scale=${frameWidth}:-2:flags=lanczos,tile=${count}x1:nb_frames=${count}`);
+    } else {
+      for (const t of positions) args.push('-ss', t, '-i', filePath);
+      const scaleChains = positions.map((_, i) =>
+        `[${i}:v]scale=${frameWidth}:-2:flags=lanczos[v${i}]`
+      );
+      const stack = `[v0]${positions.slice(1).map((_, i) => `[v${i + 1}]`).join('')}hstack=inputs=${positions.length}`;
+      args.push('-filter_complex', `${scaleChains.join(';')};${stack}`);
+    }
     args.push('-frames:v', '1', '-q:v', '4', '-f', 'mjpeg', 'pipe:1');
     const { buffer } = await withThumbTask(() => runProcessBuffer('ffmpeg', args, { timeout: 30_000, killSignal: 'SIGKILL' }));
     if (!buffer.length) throw badRequest('Kunde inte generera stillbilder.');
     thumbnailCache.set(key, buffer);
-    console.log(`[THUMBS] genererade ${item.name} · ${count} rutor · ${Date.now() - startedAt} ms`);
+    console.log(`[THUMBS] genererade ${item.name} · ${count} rutor · ${strategy} · ${Date.now() - startedAt} ms`);
     response.setHeader('Cache-Control', 'private, max-age=86400');
     response.type('image/jpeg').send(buffer);
   } catch (error) {
@@ -2593,6 +2809,12 @@ module.exports = {
   renderHtmlBlockFrames,
   renderHtmlClipToMedia,
   waveformPeaksFromPcm,
+  waveformSampleRate,
+  resampleWaveformPeaks,
+  chooseThumbnailStrategy,
+  BoundedLruCache,
+  filesHaveSameContent,
+  mediaMetadataNeedsRefresh,
   buildVisualSizeFilter,
   buildVisualContentFilter,
   buildVisualFrameFilter,
@@ -2600,6 +2822,7 @@ module.exports = {
   buildCircleMaskGraph,
   buildSubtitleAss,
   appendMediaInputArgs,
+  probeMedia,
   estimateExportStorageBytes,
   ensureExportStorage,
   createExportFilename,

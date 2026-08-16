@@ -8,6 +8,23 @@ const MAX_PX_PER_SECOND = 320;
 const TIMELINE_FPS = 30;
 let timelinePixelsPerSecond = DEFAULT_PX_PER_SECOND;
 const waveformCache = new Map();
+const MAX_WAVEFORM_CACHE_ENTRIES = 128;
+const MAX_THUMBNAIL_CACHE_ENTRIES = 96;
+
+function boundedCacheGet(cache, key) {
+  if (!cache.has(key)) return undefined;
+  const value = cache.get(key);
+  cache.delete(key);
+  cache.set(key, value);
+  return value;
+}
+
+function boundedCacheSet(cache, key, value, maximumEntries) {
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > maximumEntries) cache.delete(cache.keys().next().value);
+  return value;
+}
 const MIN_CLIP_SECONDS = 0.1;
 const MAX_IMAGE_SECONDS = 4 * 60 * 60;
 const MIN_TIMELINE_SECONDS = 90;
@@ -16,7 +33,7 @@ const MARQUEE_SCROLL_EDGE = 72;
 const MARQUEE_MAX_SCROLL_SPEED = 24;
 const state = {
   clips: [], mediaBin: [], projectName: '', savedProjectName: '', projectNameDirty: false, segmentLibrary: [], projectMediaIds: new Set(), selectedId: null, selectedIds: new Set(), playhead: 0, action: null, nvenc: false, canvas: null,
-  playing: false, playbackFrame: null, playbackOrigin: 0, playbackStartedAt: 0, playbackEnd: 0, blurDrag: null, textDrag: null,
+  playing: false, playbackFrame: null, playbackOrigin: 0, playbackStartedAt: 0, playbackEnd: 0, playbackBufferingAt: null, blurDrag: null, textDrag: null,
   currentJobId: null, pendingExportFormat: 'mp4', pendingExportSelection: null, outputDirectorySelection: null,
   currentTranscribeJobId: null, transcribingClipId: null, transcriptionMediaId: null, transcriptionSegments: [], transcriptionWords: [],
   transcriptionIndex: new Map(), transcriptSearchResults: [], transcriptSearchCursor: -1,
@@ -1841,9 +1858,16 @@ async function uploadFile(input) {
 
 async function selectMediaFromDisk({ addToTimeline = false } = {}) {
   if (!ensureProjectNamed()) return;
+  const statusElement = addToTimeline ? elements.status : elements.mediaPoolStatus;
+  const previousStatus = statusElement.textContent;
+  statusElement.textContent = 'Laddar media…';
+  statusElement.setAttribute('aria-busy', 'true');
   try {
     const result = await api('/api/media/select', { method: 'POST' });
-    if (result.cancelled) return;
+    if (result.cancelled) {
+      statusElement.textContent = previousStatus;
+      return;
+    }
     const originalPlayhead = state.playhead;
     for (const media of result.media || []) {
       addMediaToProject(media);
@@ -1859,6 +1883,8 @@ async function selectMediaFromDisk({ addToTimeline = false } = {}) {
   } catch (error) {
     elements.status.textContent = `Kunde inte öppna filväljaren: ${error.message}`;
     elements.mediaPoolStatus.textContent = error.message;
+  } finally {
+    statusElement.removeAttribute('aria-busy');
   }
 }
 
@@ -5035,18 +5061,18 @@ function drainWaveformQueue() {
       activeWaveformFetches -= 1;
       drainWaveformQueue();
     };
-    const attempt = (n) => {
-      fetch(url)
+    const attempt = (n) => fetch(url)
         .then((res) => {
           if (res.status === 429 && n < 6) {
-            setTimeout(() => attempt(n + 1), Math.min(300 * (2 ** n), 5000));
-            return null;
+            return new Promise((resolve) => {
+              setTimeout(resolve, Math.min(300 * (2 ** n), 5000));
+            }).then(() => attempt(n + 1));
           }
           if (!res.ok) throw new Error();
           return res.json();
-        })
+        });
+    attempt(0)
         .then((data) => {
-          if (!data) return;
           entry.loading = false;
           entry.peaks = Array.isArray(data.peaks) ? data.peaks : null;
           for (const cb of entry.callbacks) cb();
@@ -5059,8 +5085,6 @@ function drainWaveformQueue() {
           entry.callbacks = [];
         })
         .finally(finish);
-    };
-    attempt(0);
   }
 }
 
@@ -5070,9 +5094,10 @@ function getWaveformData(mediaId, start, end, width) {
   const normalizedEnd = Math.max(normalizedStart + 0.01, Number(end) || normalizedStart + 0.01);
   const normalizedWidth = Math.max(32, Math.min(2000, Math.round(Number(width) || 400)));
   const key = `${mediaId}:${normalizedStart.toFixed(3)}:${normalizedEnd.toFixed(3)}:${normalizedWidth}`;
-  if (waveformCache.has(key)) return waveformCache.get(key);
+  const cached = boundedCacheGet(waveformCache, key);
+  if (cached) return cached;
   const entry = { loading: true, peaks: null, callbacks: [] };
-  waveformCache.set(key, entry);
+  boundedCacheSet(waveformCache, key, entry, MAX_WAVEFORM_CACHE_ENTRIES);
   const params = new URLSearchParams({
     start: normalizedStart.toFixed(3),
     end: normalizedEnd.toFixed(3),
@@ -5153,14 +5178,14 @@ function drawTimelineThumbnails(canvas, clip) {
   const clipStart = Math.max(0, Number(clip.trimStart) || 0);
   const clipEnd = Math.max(clipStart + 0.2, Number(clip.trimEnd) || clipStart + 0.2);
   const key = `${clip.mediaId}:${frameWidth}:${count}:${clipStart.toFixed(3)}:${clipEnd.toFixed(3)}`;
-  let image = thumbnailImageCache.get(key);
+  let image = boundedCacheGet(thumbnailImageCache, key);
   if (!image) {
     const startedAt = performance.now();
     image = new Image();
     image.decoding = 'async';
     image.onload = () => {
       setClipLoadingState(clip.id, 'thumbnail', false);
-      if (!thumbnailImageCache.has(key)) thumbnailImageCache.set(key, image);
+      if (!thumbnailImageCache.has(key)) boundedCacheSet(thumbnailImageCache, key, image, MAX_THUMBNAIL_CACHE_ENTRIES);
       const elapsed = Math.round(performance.now() - startedAt);
       logProcess(`Previewbilder ${clip.name || clip.mediaId} · ${count} st · ${elapsed} ms`, 'ok');
       const liveCanvas = document.querySelector(`.clip[data-id="${CSS.escape(clip.id)}"] .clip-thumbs`);
@@ -5181,7 +5206,7 @@ function drawTimelineThumbnails(canvas, clip) {
     };
     image.src = `/api/media/${encodeURIComponent(clip.mediaId)}/thumbs?width=${frameWidth}&count=${count}&start=${clipStart.toFixed(3)}&end=${clipEnd.toFixed(3)}`;
     setClipLoadingState(clip.id, 'thumbnail', true);
-    thumbnailImageCache.set(key, image);
+    boundedCacheSet(thumbnailImageCache, key, image, MAX_THUMBNAIL_CACHE_ENTRIES);
     return;
   }
   if (image.complete && image.naturalWidth > 0) drawThumbSprite(ctx, w, h, image, count);
@@ -6197,9 +6222,33 @@ function seekVideoElement(element, time) {
   try { element.currentTime = time; } catch (_error) { /* metadata saknas */ }
 }
 
+const MEDIA_SYNC_TOLERANCE_SECONDS = 0.15;
+
+function synchronizeMediaElementTime(element, targetTime, onReady = null) {
+  if (!element) return false;
+  element._pendingMediaSyncTime = targetTime;
+  const synchronize = () => {
+    element._mediaSyncReadyPending = false;
+    if (element.readyState < 1 || element.seeking) return false;
+    const latestTarget = Number(element._pendingMediaSyncTime);
+    if (Number.isFinite(latestTarget) &&
+        Math.abs((element.currentTime || 0) - latestTarget) > MEDIA_SYNC_TOLERANCE_SECONDS) {
+      seekVideoElement(element, latestTarget);
+    }
+    if (typeof onReady === 'function') onReady();
+    return true;
+  };
+  if (element.readyState >= 1) return synchronize();
+  if (!element._mediaSyncReadyPending) {
+    element._mediaSyncReadyPending = true;
+    element.addEventListener('loadedmetadata', synchronize, { once: true });
+  }
+  return false;
+}
+
 function playMediaElementWhenReady(element) {
   if (!state.playing || !element) return;
-  if (!element.paused && !element.ended) return;
+  if ((!element.paused && !element.ended) || element._playbackRetryPending) return;
   if (element.ended) element.pause();
   const attempt = () => {
     if (!state.playing || !element.paused) {
@@ -6310,23 +6359,11 @@ function renderLayerMedia(time, playing = false) {
     const targetTime = clamp(sourceTime, 0, clip.mediaDuration);
     const seekCurrentClip = () => {
       if (element.dataset.clipId === clip.id && element.dataset.mediaId === clip.mediaId) {
-        seekVideoElement(element, targetTime);
         if (state.playing && playing) playMediaElementWhenReady(element);
       }
     };
-    if (state.playing && playing) {
-      if (element.readyState >= 1) {
-        if (Math.abs((element.currentTime || 0) - targetTime) > 0.15) seekCurrentClip();
-      } else {
-        element.addEventListener('loadedmetadata', seekCurrentClip, { once: true });
-        element.addEventListener('canplay', seekCurrentClip, { once: true });
-        element.addEventListener('loadeddata', () => playMediaElementWhenReady(element), { once: true });
-      }
-      playMediaElementWhenReady(element);
-    } else {
-      if (element.readyState >= 1) seekCurrentClip();
-      else element.addEventListener('loadedmetadata', seekCurrentClip, { once: true });
-    }
+    synchronizeMediaElementTime(element, targetTime, seekCurrentClip);
+    if (state.playing && playing) playMediaElementWhenReady(element);
   }
 }
 
@@ -6481,6 +6518,7 @@ function togglePlayback() {
   state.playbackEnd = end;
   state.playbackOrigin = state.playhead;
   state.playbackStartedAt = performance.now();
+  state.playbackBufferingAt = null;
   elements.togglePlay.querySelector('use').setAttribute('href', '#icon-pause');
   playbackTick(performance.now());
 }
@@ -6490,6 +6528,7 @@ function stopPlayback() {
   if (state.playbackFrame) cancelAnimationFrame(state.playbackFrame);
   state.playbackFrame = null;
   state.playbackEnd = 0;
+  state.playbackBufferingAt = null;
   elements.preview.pause();
   for (const element of state.previewLayers.values()) element.pause?.();
   stopTimelineAudioPlayers();
@@ -6506,8 +6545,32 @@ function playbackTick(now) {
     return;
   }
   setPlayhead(time, false);
+  preloadUpcomingMedia(time);
   syncPlaybackMedia(time);
+  if (playbackMediaIsBuffering(time)) {
+    if (!Number.isFinite(state.playbackBufferingAt)) state.playbackBufferingAt = time;
+    state.playbackOrigin = state.playbackBufferingAt;
+    state.playbackStartedAt = now;
+    setPlayhead(state.playbackBufferingAt, false);
+  } else {
+    state.playbackBufferingAt = null;
+  }
   state.playbackFrame = requestAnimationFrame(playbackTick);
+}
+
+function playbackMediaIsBuffering(time) {
+  const mediaElements = [];
+  for (const clip of activeVisualLayers(time)) {
+    if (clip.kind === 'video') mediaElements.push(visualMediaElement(clip));
+  }
+  for (const clip of state.clips) {
+    if (clip.kind !== 'audio' || time < clip.start || time >= clip.start + clipDuration(clip)) continue;
+    const player = state.timelineAudioPlayers.get(clip.id);
+    if (player) mediaElements.push(player);
+  }
+  return mediaElements.some((element) =>
+    element && !element.error && (element.seeking || element.readyState < 2)
+  );
 }
 
 function maxTrackFor(time, kinds) {
@@ -6583,9 +6646,7 @@ function syncPlaybackMedia(time) {
     const targetTime = clamp(sourceTime, 0, audio.mediaDuration);
     const changed = player.dataset.mediaId !== audio.mediaId;
     const seek = () => {
-      try {
-        player.currentTime = targetTime;
-      } catch (_error) { /* metadata laddas fortfarande */ }
+      playMediaElementWhenReady(player);
     };
     if (changed) {
       player.pause();
@@ -6596,15 +6657,9 @@ function syncPlaybackMedia(time) {
       // for detached/hidden audio elements (notably Chromium after a clip
       // boundary).  jsdom does not implement load(), so skip it there.
       if (!/jsdom/i.test(navigator.userAgent || '') && typeof player.load === 'function') player.load();
-      if (player.readyState >= 1) seek();
-      else player.addEventListener('loadedmetadata', seek, { once: true });
-      player.addEventListener('canplay', () => playMediaElementWhenReady(player), { once: true });
-      player.addEventListener('loadeddata', () => playMediaElementWhenReady(player), { once: true });
-    } else if (player.readyState >= 1 && Math.abs(player.currentTime - targetTime) > 0.15) {
-      seek();
     }
+    synchronizeMediaElementTime(player, targetTime, seek);
     if (!activeVisualLayers(time).length) watchPreviewMediaReadiness(player, audio, true);
-    if (player.paused) player.play().catch(() => {});
     playMediaElementWhenReady(player);
   }
 }

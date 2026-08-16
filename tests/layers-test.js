@@ -125,6 +125,7 @@ setTimeout(() => {
         if (c1.track === c2.track) throw new Error('Det importerade klippet hamnade inte på ett eget lager.');
 
         // 3. Drag second clip to start 0 so it overlaps video1.
+        dragClipToStart(c1.clip, 0);
         dragClipToStart(c2.clip, 0);
         scrubTo(0.5);
         setTimeout(() => {

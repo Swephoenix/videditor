@@ -10,13 +10,13 @@ const serverSource = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
 
 assert.match(
   appSource,
-  /Math\.abs\(player\.currentTime - targetTime\) > 0\.15/,
-  'Förhandslyssningen ska hålla ljudet synkat med bilden (max ~150 ms avvikelse).'
+  /element\.readyState < 1 \|\| element\.seeking/,
+  'Förhandslyssningen ska vänta på en pågående seek innan en ny synkning görs.'
 );
 assert.match(
   appSource,
-  /if \(player\.paused\) player\.play\(\)\.catch/,
-  'Förhandslyssningen ska inte anropa play() för ljudet varje frame, bara när det är pausat.'
+  /synchronizeMediaElementTime\(player, targetTime, seek\)/,
+  'Ljudspelaren ska använda den gemensamma seek-synkningen.'
 );
 assert.match(
   serverSource,

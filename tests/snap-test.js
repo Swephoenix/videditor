@@ -49,7 +49,10 @@ window.fetch = async (url, opts) => {
   return makeResponse({});
 };
 
-try { window.eval(timelineModelJs); window.eval(appJs); } catch (e) { console.log('SCRIPT ERROR:', e.message, e.stack); process.exit(1); }
+try {
+  window.eval(timelineModelJs);
+  window.eval(`${appJs}\nwindow.__snapTest = { state, renderAllClips };`);
+} catch (e) { console.log('SCRIPT ERROR:', e.message, e.stack); process.exit(1); }
 
 function importFile(name) {
   const input = document.querySelector('#media-input');
@@ -102,8 +105,22 @@ setTimeout(() => {
         const c1 = findVideoClip('video1.mp4');
         const c2 = findVideoClip('video2.mp4');
         if (!c1 || !c2) throw new Error('Klipp hittades inte.');
-        const start2 = clipStartSeconds(c2.clip);
-        console.log('Initial layout: video1 start', clipStartSeconds(c1.clip), ' video2 start', start2, '(expect 0 / 10)');
+        // Den nya importdialogen infogar vid playhead. Normalisera test-fixturen
+        // till två sekventiella klipp innan själva snap-beteendet provas.
+        const stateClips = window.__snapTest.state.clips;
+        const firstVideo = stateClips.find((clip) => clip.name === 'video1.mp4');
+        const secondVideo = stateClips.find((clip) => clip.name === 'video2.mp4');
+        firstVideo.start = 0;
+        secondVideo.start = 10;
+        for (const clip of stateClips.filter((clip) => clip.kind === 'audio')) {
+          if (clip.linkGroupId === firstVideo.linkGroupId) clip.start = 0;
+          if (clip.linkGroupId === secondVideo.linkGroupId) clip.start = 10;
+        }
+        window.__snapTest.renderAllClips();
+        const normalizedC1 = findVideoClip('video1.mp4');
+        const normalizedC2 = findVideoClip('video2.mp4');
+        const start2 = clipStartSeconds(normalizedC2.clip);
+        console.log('Initial layout: video1 start', clipStartSeconds(normalizedC1.clip), ' video2 start', start2, '(expect 0 / 10)');
         if (Math.abs(start2 - 10) > 0.05) throw new Error('video2 ska börja vid 10 s efter video1 (0–10 s).');
 
         const snapGuide = document.querySelector('#snap-guide');
