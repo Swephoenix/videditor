@@ -582,6 +582,7 @@ body.resizing-tools-panel .tools-panel-resizer::before {
 }
 .preview-window {
   position: relative;
+  isolation: isolate;
   width: 100%;
   max-width: 960px;
   aspect-ratio: 16 / 9;

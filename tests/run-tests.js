@@ -19,6 +19,7 @@ const tests = [
   'export-storage-test.js',
   'export-output-folder-test.js',
   'directory-picker-test.js',
+  'z-layer-test.js',
   'gpu-export-input-test.js',
   'webm-alpha-test.js',
   'multitrack-test.js',
