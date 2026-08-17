@@ -39,6 +39,7 @@ const MAX_DURATION = 4 * 60 * 60;
 const MAX_AUDIO_ANALYSES = 200;
 const MAX_AUDIO_TASKS = 2;
 const AUDIO_TASK_TIMEOUT_MS = 30 * 60 * 1000;
+const AUDIO_MIX_LIMITER = 'alimiter=limit=0.95:level=0:latency=1';
 const EXPORT_SAFETY_BYTES = 512 * 1024 * 1024;
 const OUTPUT_DIRECTORY_TTL_MS = 12 * 60 * 60 * 1000;
 const MEDIA_METADATA_VERSION = 2;
@@ -77,6 +78,39 @@ let activeOutputDirectoryPicker = null;
 let librarySaveQueue = Promise.resolve();
 let audioAnalysisSaveQueue = Promise.resolve();
 let activeAudioTasks = 0;
+
+class TaskQueue {
+  constructor(maxConcurrent = 1) {
+    this.maxConcurrent = Math.max(1, Math.floor(maxConcurrent));
+    this.activeCount = 0;
+    this.pending = [];
+  }
+
+  get pendingCount() { return this.pending.length; }
+
+  enqueue(task) {
+    return new Promise((resolve, reject) => {
+      this.pending.push({ task, resolve, reject });
+      setImmediate(() => this.drain());
+    });
+  }
+
+  drain() {
+    while (this.activeCount < this.maxConcurrent && this.pending.length > 0) {
+      const entry = this.pending.shift();
+      this.activeCount += 1;
+      Promise.resolve()
+        .then(entry.task)
+        .then(entry.resolve, entry.reject)
+        .finally(() => {
+          this.activeCount -= 1;
+          this.drain();
+        });
+    }
+  }
+}
+
+const exportQueue = new TaskQueue(1);
 
 class BoundedLruCache {
   constructor({ maxEntries, maxBytes }) {
@@ -1321,13 +1355,19 @@ app.post('/api/export', async (request, response, next) => {
     };
     jobs.set(id, job);
     response.status(202).json(job);
-    setImmediate(() => {
-      renderProject(id, project).catch((error) => {
+    exportQueue.enqueue(async () => {
+      if (job.aborted) return;
+      try {
+        await renderProject(id, project);
+      } catch (error) {
+        if (job.aborted) return;
         Object.assign(job, {
           status: 'failed', reservedBytes: 0,
           error: error.message || 'Exporten kunde inte startas.'
         });
-      });
+      }
+    }).catch((error) => {
+      if (!job.aborted) Object.assign(job, { status: 'failed', reservedBytes: 0, error: error.message });
     });
   } catch (error) {
     next(error);
@@ -1412,6 +1452,28 @@ function parseFrameRate(value) {
 function formatFrameRate(value) {
   const frameRate = parseFrameRate(value) ?? 30;
   return frameRate.toFixed(6).replace(/\.?0+$/, '');
+}
+
+function buildScaleAnimationFilter(clip, frameRate) {
+  const animFrames = Math.max(1, Math.ceil(clip.animIn.duration * frameRate));
+  const progress = `max(0.01,min(1,n/${animFrames}))`;
+  return `scale=w='max(2,trunc(iw*${progress}/2)*2)':` +
+    `h='max(2,trunc(ih*${progress}/2)*2)':eval=frame`;
+}
+
+function appendNvencVideoArgs(args, quality) {
+  const q = Math.round(clamp(Number(quality) || 5, 1, 5));
+  if (q === 5) {
+    args.push(
+      '-c:v', 'h264_nvenc', '-preset', 'p7', '-tune', 'lossless',
+      '-rc', 'constqp', '-qp', '0', '-profile:v', 'high'
+    );
+    return { lossless: true, label: 'förlustfri H.264' };
+  }
+  const cq = [null, 34, 27, 20, 13][q] ?? 20;
+  const qualityLabel = ['', 'låg', 'balanserad', 'standard', 'hög'][q] || `nivå ${q}`;
+  args.push('-c:v', 'h264_nvenc', '-preset', 'p5', '-cq', String(cq), '-profile:v', 'high');
+  return { lossless: false, label: `${qualityLabel} (CQ ${cq})` };
 }
 
 function chooseProjectFrameRate(clips) {
@@ -1530,10 +1592,14 @@ function estimateExportStorageBytes(project) {
 
   const width = Math.max(64, Number(project?.canvas?.width) || 1920);
   const height = Math.max(64, Number(project?.canvas?.height) || 1080);
-  const quality = Math.round(clamp(Number(project?.quality) || 5, 1, 5));
-  const bitrateAt1080p = [0, 2, 5, 10, 25, 60][quality] * 1_000_000;
+  const quality = project?.upscale
+    ? 5
+    : Math.round(clamp(Number(project?.quality) || 5, 1, 5));
+  const frameRate = chooseProjectFrameRate(project?.clips || []);
   const resolutionScale = Math.max(0.2, (width * height) / (1920 * 1080));
-  const videoBytes = duration * bitrateAt1080p * resolutionScale / 8;
+  const videoBytes = quality === 5
+    ? duration * width * height * 1.5 * frameRate * 1.05
+    : duration * [0, 2, 5, 10, 25][quality] * 1_000_000 * resolutionScale / 8;
   const audioBytes = duration * 192000 / 8;
   const encodedBytes = (videoBytes + audioBytes) * 1.12;
   const workingCopies = project?.upscale ? 3 : 1;
@@ -2232,7 +2298,7 @@ async function renderAudioProject(jobId, project) {
   } else {
     filters.push(
       `${audios.map((label) => `[${label}]`).join('')}amix=inputs=${audios.length}:duration=longest:` +
-      `normalize=0,${finishAudio}`
+      `normalize=0,${AUDIO_MIX_LIMITER},${finishAudio}`
     );
   }
 
@@ -2267,11 +2333,11 @@ async function convertSvgToPng(svgPath, outputDir) {
 
 const MAX_HTML_CODE = 200000;
 
-function loadPuppeteer() {
+async function loadPuppeteer() {
   try {
-    return require('puppeteer');
-  } catch (_error) {
-    throw new Error('puppeteer saknas. Installera det med: npm install puppeteer');
+    return await import('puppeteer');
+  } catch (error) {
+    throw new Error(`Puppeteer kunde inte laddas: ${error.message}`);
   }
 }
 
@@ -2282,28 +2348,74 @@ function wrapHtmlDocument(code) {
     `</style></head><body>${code}</body></html>`;
 }
 
-async function renderHtmlBlockFrames(html, blockWidth, blockHeight, duration, fps, outputDir) {
-  const puppeteer = loadPuppeteer();
+function exportCancelledError() {
+  const error = new Error('Exporten avbröts.');
+  error.code = 'EXPORT_CANCELLED';
+  return error;
+}
+
+function ensureExportActive(shouldAbort) {
+  if (shouldAbort?.()) throw exportCancelledError();
+}
+
+async function cancellableDelay(milliseconds, shouldAbort) {
+  const deadline = Date.now() + Math.max(0, milliseconds);
+  while (Date.now() < deadline) {
+    ensureExportActive(shouldAbort);
+    await new Promise((resolve) => setTimeout(resolve, Math.min(50, deadline - Date.now())));
+  }
+}
+
+async function cancellableOperation(operation, shouldAbort) {
+  if (!shouldAbort) return operation;
+  ensureExportActive(shouldAbort);
+  let interval;
+  const cancellation = new Promise((_, reject) => {
+    interval = setInterval(() => {
+      if (shouldAbort()) reject(exportCancelledError());
+    }, 50);
+  });
+  try {
+    return await Promise.race([operation, cancellation]);
+  } finally {
+    clearInterval(interval);
+  }
+}
+
+async function renderHtmlBlockFrames(html, blockWidth, blockHeight, duration, fps, outputDir, shouldAbort = null) {
+  const puppeteer = await loadPuppeteer();
   const totalFrames = Math.max(1, Math.round(duration * fps));
+  ensureExportActive(shouldAbort);
   await fsp.mkdir(outputDir, { recursive: true });
   const browser = await puppeteer.launch({
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu']
   });
   try {
+    ensureExportActive(shouldAbort);
     const page = await browser.newPage();
     await page.setViewport({ width: blockWidth, height: blockHeight, deviceScaleFactor: 1 });
-    await page.setContent(wrapHtmlDocument(html.code), { waitUntil: 'networkidle0' });
-    await page.evaluate(() => document.fonts && document.fonts.ready).catch(() => {});
+    await cancellableOperation(
+      page.setContent(wrapHtmlDocument(html.code), { waitUntil: 'networkidle0' }),
+      shouldAbort
+    );
+    await cancellableOperation(
+      page.evaluate(() => document.fonts && document.fonts.ready).catch(() => {}),
+      shouldAbort
+    );
     const startTime = Date.now();
     for (let frame = 1; frame <= totalFrames; frame += 1) {
+      ensureExportActive(shouldAbort);
       const target = startTime + (frame / fps) * 1000;
       const wait = target - Date.now();
-      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
-      await page.screenshot({
-        path: path.join(outputDir, `frame-${String(frame).padStart(4, '0')}.png`),
-        type: 'png',
-        omitBackground: true
-      });
+      if (wait > 0) await cancellableDelay(wait, shouldAbort);
+      await cancellableOperation(
+        page.screenshot({
+          path: path.join(outputDir, `frame-${String(frame).padStart(4, '0')}.png`),
+          type: 'png',
+          omitBackground: true
+        }),
+        shouldAbort
+      );
     }
   } finally {
     await browser.close();
@@ -2368,32 +2480,43 @@ async function renderProject(jobId, project) {
   let inputIndex = 0;
   const svgClips = project.clips.filter((clip) => clip.media?.storedName?.toLowerCase().endsWith('.svg'));
   const tempPngs = [];
-  await Promise.all(svgClips.map(async (clip) => {
-    const svgPath = mediaFilePath(clip.media);
-    const pngPath = await convertSvgToPng(svgPath, EXPORT_DIR);
-    clip._svgPngPath = pngPath;
-    tempPngs.push(pngPath);
-  }));
   const { width, height } = project.canvas;
   const frameRate = chooseProjectFrameRate(project.clips);
   const fps = formatFrameRate(frameRate);
   job.frameRate = frameRate;
   const htmlClips = project.clips.filter((clip) => clip.kind === 'html');
-  let htmlIndex = 0;
-  for (const clip of htmlClips) {
-    const html = clip.html;
-    const blockWidth = Math.max(2, Math.round(html.width * width));
-    const blockHeight = Math.max(2, Math.round(html.height * height));
-    const length = clip.trimEnd - clip.trimStart;
-    const framesDir = path.join(EXPORT_DIR, `html-${jobId}-${htmlIndex}`);
-    tempPngs.push(framesDir);
-    job.phase = 'html-render';
-    job.phaseStartedAt = new Date().toISOString();
-    await renderHtmlBlockFrames(html, blockWidth, blockHeight, length, frameRate, framesDir);
-    clip._htmlFramesDir = framesDir;
-    clip._htmlBlockWidth = blockWidth;
-    clip._htmlBlockHeight = blockHeight;
-    htmlIndex += 1;
+  const cleanupPreparedFiles = async () => {
+    await Promise.all(tempPngs.map((item) => fsp.rm(item, { recursive: true, force: true }).catch(() => {})));
+  };
+  try {
+    await Promise.all(svgClips.map(async (clip) => {
+      const svgPath = mediaFilePath(clip.media);
+      const pngPath = await convertSvgToPng(svgPath, EXPORT_DIR);
+      clip._svgPngPath = pngPath;
+      tempPngs.push(pngPath);
+    }));
+    ensureExportActive(() => job.aborted);
+    let htmlIndex = 0;
+    for (const clip of htmlClips) {
+      const html = clip.html;
+      const blockWidth = Math.max(2, Math.round(html.width * width));
+      const blockHeight = Math.max(2, Math.round(html.height * height));
+      const length = clip.trimEnd - clip.trimStart;
+      const framesDir = path.join(EXPORT_DIR, `html-${jobId}-${htmlIndex}`);
+      tempPngs.push(framesDir);
+      job.phase = 'html-render';
+      job.phaseStartedAt = new Date().toISOString();
+      await renderHtmlBlockFrames(html, blockWidth, blockHeight, length, frameRate, framesDir, () => job.aborted);
+      clip._htmlFramesDir = framesDir;
+      clip._htmlBlockWidth = blockWidth;
+      clip._htmlBlockHeight = blockHeight;
+      htmlIndex += 1;
+    }
+    ensureExportActive(() => job.aborted);
+  } catch (error) {
+    await cleanupPreparedFiles();
+    if (job.aborted || error.code === 'EXPORT_CANCELLED') return;
+    throw error;
   }
   if (htmlClips.length > 0) {
     job.phase = 'encode';
@@ -2435,16 +2558,11 @@ async function renderProject(jobId, project) {
         : '';
       const contentFilter = buildVisualContentFilter(clip, width, height);
       const frameFilter = buildVisualFrameFilter(clip, width, height);
+      const scaleAnimation = clip.animIn?.type === 'scale';
       let animPost = '';
       if (clip.animIn?.type === 'fade') {
         animPost = `format=rgba,fade=t=in:st=${clip.start.toFixed(3)}:` +
           `d=${clip.animIn.duration.toFixed(3)}:alpha=1,`;
-      } else if (clip.animIn?.type === 'scale') {
-        const totalFrames = Math.ceil(length * frameRate);
-        const animFrames = Math.ceil(clip.animIn.duration * frameRate);
-        animPost = `zoompan=z='min(1,0.01+0.99*on/${animFrames})':` +
-          `d=${totalFrames}:s=${width}x${height}:fps=${fps},format=rgba,` +
-          `setpts=PTS-STARTPTS+${clip.start.toFixed(3)}/TB,`;
       }
       if (clip.animOut?.type === 'fade') {
         const fadeDuration = Math.min(Number(clip.animOut.duration) || 0.5, length);
@@ -2458,18 +2576,25 @@ async function renderProject(jobId, project) {
       // section produces continuous, CFR frames instead of a held/frozen
       // frame at the segment boundary.
       const cadenceFilter = clip.kind === 'video' ? `fps=${fps},` : '';
-      filters.push(
+      const visualChain =
         `[${clip.inputIndex}:v]${trim},` +
         (clip.kind === 'image' ? 'format=rgba,' : '') +
         cropFilter +
         `setpts=PTS-STARTPTS,${cadenceFilter}setpts=PTS-STARTPTS+${clip.start.toFixed(3)}/TB,` +
         contentFilter +
         circleFilter +
-        frameFilter +
-        animPost +
-        `setsar=1` +
-        `[${baseLabel}]`
-      );
+        frameFilter;
+      if (scaleAnimation) {
+        filters.push(
+          `${visualChain}format=rgba,${buildScaleAnimationFilter(clip, frameRate)}[vscaled${index}];` +
+          `color=c=black@0:s=${width}x${height}:r=${fps}:d=${length.toFixed(3)},format=rgba,` +
+          `setpts=PTS-STARTPTS+${clip.start.toFixed(3)}/TB[vscalebase${index}];` +
+          `[vscalebase${index}][vscaled${index}]overlay=x=(W-w)/2:y=(H-h)/2:eval=frame:` +
+          `eof_action=pass:shortest=1,${animPost}setsar=1[${baseLabel}]`
+        );
+      } else {
+        filters.push(`${visualChain}${animPost}setsar=1[${baseLabel}]`);
+      }
       if (clip.transitionIn?.type === 'dissolve') {
         filters.push(
           `[${baseLabel}]format=rgba,fade=t=in:st=${clip.start.toFixed(3)}:` +
@@ -2655,29 +2780,22 @@ async function renderProject(jobId, project) {
   } else {
     filters.push(
       `${audios.map((label) => `[${label}]`).join('')}amix=inputs=${audios.length}:duration=longest:` +
-      `normalize=0,aresample=async=1:first_pts=0,asetpts=N/SR/TB,` +
+      `normalize=0,${AUDIO_MIX_LIMITER},aresample=async=1:first_pts=0,asetpts=N/SR/TB,` +
       `apad,atrim=duration=${project.duration.toFixed(3)}[aout]`
     );
   }
 
-  const CRF_MAP = [null, 28, 24, 20, 15, 0];
-  const CQ_MAP = [null, 34, 27, 20, 13, 1];
   const q = project.upscale ? 5 : (project.quality != null ? project.quality : 5);
-  const crf = CRF_MAP[q] ?? 20;
-  const cq = CQ_MAP[q] ?? 20;
-  const lossless = crf === 0;
-  const qualityLabel = lossless ? 'lossless' : (['', 'låg', '', 'standard', '', ''][q] || `nivå ${q}`);
 
   args.push('-filter_complex', filters.join(';'), '-map', '[vout]', '-map', '[aout]');
-  args.push('-c:v', 'h264_nvenc', '-preset', 'p5', '-cq', String(cq), '-profile:v', 'high');
+  const encoder = appendNvencVideoArgs(args, q);
   args.push(
     '-r', fps, '-fps_mode', 'cfr',
     '-c:a', 'aac', '-b:a', '192k', '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
     '-t', project.duration.toFixed(3), '-progress', 'pipe:1', '-nostats', outputPath
   );
   const hwLabel = 'FFmpeg-avkodning → NVIDIA NVENC';
-  const encoderLabel = lossless ? `${hwLabel} · lossless` : `${hwLabel} · ${qualityLabel} (CRF ${crf})`;
-  job.encoder = encoderLabel;
+  job.encoder = `${hwLabel} · ${encoder.label}`;
   job.phase = 'seek-decode';
   job.phaseStartedAt = new Date().toISOString();
   const child = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -2701,24 +2819,35 @@ async function renderProject(jobId, project) {
     }
   });
   child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString()).slice(-8000); });
-  child.on('error', (error) => {
-    Object.assign(job, { status: 'failed', reservedBytes: 0, error: error.message });
-    fsp.unlink(outputPath).catch(() => {});
-  });
-  child.on('close', (code) => {
-    if (job.aborted) return;
-    if (code !== 0) {
-      Object.assign(job, { status: 'failed', reservedBytes: 0, error: ffmpegFailureMessage(code, stderr) });
+  await new Promise((resolve) => {
+    let spawnError = null;
+    child.on('error', (error) => {
+      spawnError = error;
+      Object.assign(job, { status: 'failed', reservedBytes: 0, error: error.message });
       fsp.unlink(outputPath).catch(() => {});
       cleanupTextFiles();
-      return;
-    }
-    cleanupTextFiles();
-    if (!project.upscale) {
-      Object.assign(job, { status: 'completed', progress: 100, outputPath, reservedBytes: 0 });
-      return;
-    }
-    runUpscaleStep(jobId, project, outputPath);
+    });
+    child.on('close', async (code) => {
+      if (job.aborted) {
+        await fsp.unlink(outputPath).catch(() => {});
+        cleanupTextFiles();
+        return resolve();
+      }
+      if (spawnError) return resolve();
+      if (code !== 0) {
+        Object.assign(job, { status: 'failed', reservedBytes: 0, error: ffmpegFailureMessage(code, stderr) });
+        await fsp.unlink(outputPath).catch(() => {});
+        cleanupTextFiles();
+        return resolve();
+      }
+      cleanupTextFiles();
+      if (!project.upscale) {
+        Object.assign(job, { status: 'completed', progress: 100, outputPath, reservedBytes: 0 });
+        return resolve();
+      }
+      await runUpscaleStep(jobId, project, outputPath);
+      resolve();
+    });
   });
 
   async function runUpscaleStep(jobId, project, renderedPath) {
@@ -2734,11 +2863,23 @@ async function renderProject(jobId, project) {
     });
     try {
       await runUpscale(job, renderedPath, upscaledPath);
-      if (job.aborted) return;
+      if (job.aborted) {
+        await Promise.all([
+          fsp.unlink(renderedPath).catch(() => {}),
+          fsp.unlink(upscaledPath).catch(() => {})
+        ]);
+        return;
+      }
       await fsp.unlink(renderedPath).catch(() => {});
       Object.assign(job, { status: 'completed', progress: 100, outputPath: upscaledPath, reservedBytes: 0 });
     } catch (error) {
-      if (job.aborted) return;
+      if (job.aborted) {
+        await Promise.all([
+          fsp.unlink(renderedPath).catch(() => {}),
+          fsp.unlink(upscaledPath).catch(() => {})
+        ]);
+        return;
+      }
       await fsp.unlink(upscaledPath).catch(() => {});
       Object.assign(job, { status: 'failed', error: error.message, reservedBytes: 0 });
     }
@@ -2813,15 +2954,20 @@ module.exports = {
   resampleWaveformPeaks,
   chooseThumbnailStrategy,
   BoundedLruCache,
+  TaskQueue,
+  AUDIO_MIX_LIMITER,
   filesHaveSameContent,
   mediaMetadataNeedsRefresh,
   buildVisualSizeFilter,
   buildVisualContentFilter,
   buildVisualFrameFilter,
+  buildScaleAnimationFilter,
+  appendNvencVideoArgs,
   buildCircleMaskFilter,
   buildCircleMaskGraph,
   buildSubtitleAss,
   appendMediaInputArgs,
+  cancellableDelay,
   probeMedia,
   estimateExportStorageBytes,
   ensureExportStorage,

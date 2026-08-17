@@ -138,6 +138,7 @@ async function waitForJob(job, timeoutMilliseconds = 20000) {
         muted: true,
         trackIndex: 1,
         visualScale: 1.2,
+        animIn: { type: 'scale', duration: 0.3 },
         transitionIn: { type: 'dissolve', duration: 0.4, cut: 0.8 }
       },
       {

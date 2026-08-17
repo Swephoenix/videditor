@@ -13,6 +13,8 @@ const tests = [
   'project-json-roundtrip-test.js',
   'ai-upscale-test.js',
   'export-render-test.js',
+  'scale-animation-export-test.js',
+  'export-safety-test.js',
   'export-fps-test.js',
   'export-storage-test.js',
   'export-output-folder-test.js',
