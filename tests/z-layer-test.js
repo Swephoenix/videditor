@@ -15,6 +15,6 @@ assert.match(
   /\bisolation\s*:\s*isolate\s*;/,
   'Preview-fönstret måste kapsla sina höga interna z-index så de inte täcker globala menyer.'
 );
-assert.match(html, /styles\.css\?v=0\.17\.9/, 'CSS-cacheversionen uppdaterades inte.');
+assert.match(html, /styles\.css\?v=0\.18\.0/, 'CSS-cacheversionen uppdaterades inte.');
 
 console.log('Z-LAYER ORDER OK');

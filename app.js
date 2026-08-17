@@ -203,6 +203,7 @@ const elements = {
   transcriptionCopyStatus: document.querySelector('#transcription-copy-status'),
   transcribe: document.querySelector('#transcribe'),
   clipContextMenu: document.querySelector('#clip-context-menu'),
+  relinkMedia: document.querySelector('#relink-media'),
   separateFromAudio: document.querySelector('#separate-from-audio'),
   layerContextMenu: document.querySelector('#layer-context-menu'),
   layerContextTitle: document.querySelector('#layer-context-title'),
@@ -696,6 +697,10 @@ elements.separateFromAudio.addEventListener('click', () => {
   hideClipContextMenu();
   separateAudioFromVideo();
 });
+elements.relinkMedia.addEventListener('click', () => {
+  hideClipContextMenu();
+  relinkSelectedMedia();
+});
 elements.transcriptSearchInput.addEventListener('input', updateTranscriptSearch);
 elements.transcriptSearchInput.addEventListener('focus', () => {
   transcriptSearchFocused = true;
@@ -809,7 +814,8 @@ elements.timeline.addEventListener('contextmenu', (event) => {
   }
   const clip = state.clips.find((item) => item.id === clipElement.dataset.id);
   if (!clip) return;
-  if (clip.kind !== 'audio' && clip.kind !== 'video') {
+  const missing = clipMediaMissing(clip);
+  if (!missing && clip.kind !== 'audio' && clip.kind !== 'video') {
     hideClipContextMenu();
     return;
   }
@@ -817,16 +823,17 @@ elements.timeline.addEventListener('contextmenu', (event) => {
   if (state.playing) stopPlayback();
   selectClip(clip.id);
   const isAudio = clip.kind === 'audio';
-  elements.transcribe.hidden = !isAudio;
-  elements.separateFromAudio.hidden = isAudio;
-  elements.transcribe.disabled = !isAudio;
+  elements.relinkMedia.hidden = !missing;
+  elements.transcribe.hidden = missing || !isAudio;
+  elements.separateFromAudio.hidden = missing || isAudio;
+  elements.transcribe.disabled = missing || !isAudio;
   elements.transcribe.title = isAudio ? '' : 'Högerklicka på ett ljudklipp för att transkribera.';
   elements.clipContextMenu.hidden = false;
   const menuWidth = elements.clipContextMenu.offsetWidth || 180;
   const menuHeight = elements.clipContextMenu.offsetHeight || 48;
   elements.clipContextMenu.style.left = `${Math.max(4, Math.min(event.clientX, window.innerWidth - menuWidth - 4))}px`;
   elements.clipContextMenu.style.top = `${Math.max(4, Math.min(event.clientY, window.innerHeight - menuHeight - 4))}px`;
-  (isAudio ? elements.transcribe : elements.separateFromAudio).focus();
+  (missing ? elements.relinkMedia : isAudio ? elements.transcribe : elements.separateFromAudio).focus();
 });
 document.addEventListener('pointerdown', (event) => {
   if (!(event.target instanceof Element) || !event.target.closest('#clip-context-menu')) hideClipContextMenu();
@@ -2015,6 +2022,66 @@ function addMediaLibraryItem(media) {
   renderMediaBin();
 }
 
+function mediaItemForClip(clip) {
+  return state.mediaBin.find((item) => item.id === clip?.mediaId) || null;
+}
+
+function clipMediaMissing(clip) {
+  const media = mediaItemForClip(clip);
+  return Boolean(media && media.available === false);
+}
+
+function mediaRevision(mediaId) {
+  const media = state.mediaBin.find((item) => item.id === mediaId);
+  return media?.relinkedAt || media?.createdAt || '';
+}
+
+function mediaFileUrl(mediaId) {
+  const revision = mediaRevision(mediaId);
+  const suffix = revision ? `?v=${encodeURIComponent(revision)}` : '';
+  return `/api/media/${encodeURIComponent(mediaId)}/file${suffix}`;
+}
+
+async function relinkSelectedMedia() {
+  const selected = state.clips.find((clip) => clip.id === state.selectedId);
+  const media = mediaItemForClip(selected);
+  if (!selected || !media || media.available !== false) return;
+  const affected = state.clips.filter((clip) => clip.mediaId === media.id);
+  const requiredDuration = affected.reduce(
+    (maximum, clip) => Math.max(maximum, Number(clip.trimEnd) || 0),
+    0
+  );
+  elements.status.textContent = `Välj var ${media.name} finns nu…`;
+  try {
+    const result = await api(`/api/media/${encodeURIComponent(media.id)}/relink`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requiredDuration })
+    });
+    if (result.cancelled) {
+      elements.status.textContent = 'Omlänkningen avbröts.';
+      return;
+    }
+    const replacement = result.media;
+    addMediaLibraryItem(replacement);
+    for (const clip of affected) {
+      clip.mediaDuration = replacement.duration || clip.mediaDuration;
+      if (replacement.width) clip.sourceWidth = replacement.width;
+      if (replacement.height) clip.sourceHeight = replacement.height;
+    }
+    const preloader = state.mediaPreloaders.get(media.id);
+    if (preloader) preloader.src = '';
+    state.mediaPreloaders.delete(media.id);
+    stopTimelineAudioPlayers(true);
+    renderAllClips();
+    setPlayhead(state.playhead);
+    persist();
+    elements.status.textContent = `${media.name} länkades om till ${replacement.name}.`;
+  } catch (error) {
+    elements.status.textContent = `Kunde inte länka om media: ${error.message}`;
+  }
+}
+
 function addMediaToProject(media) {
   if (media?.id) state.projectMediaIds.add(media.id);
 }
@@ -2119,6 +2186,7 @@ function renderMediaBin() {
   list.replaceChildren(...projectMedia.map((media) => {
     const item = document.createElement('div');
     item.className = 'media-pool-item';
+    item.classList.toggle('media-missing', media.available === false);
     item.dataset.mediaId = media.id;
     item.setAttribute('role', 'listitem');
     const icon = document.createElement('span');
@@ -2127,17 +2195,20 @@ function renderMediaBin() {
     icon.setAttribute('aria-hidden', 'true');
     const info = document.createElement('div');
     info.className = 'media-pool-name';
-    info.title = media.name;
+    info.title = media.available === false ? `${media.name}\nSaknas: ${media.sourcePath || 'okänd plats'}` : media.name;
     info.textContent = media.name;
     const meta = document.createElement('span');
     meta.className = 'media-pool-meta';
-    meta.textContent = `${media.kind} · ${mediaDurationLabel(media)}`;
+    meta.textContent = media.available === false
+      ? `Media saknas · ${media.kind} · ${mediaDurationLabel(media)}`
+      : `${media.kind} · ${mediaDurationLabel(media)}`;
     info.appendChild(meta);
     const add = document.createElement('button');
     add.type = 'button';
     add.className = 'media-pool-add';
     add.textContent = 'Lägg till';
     add.title = 'Lägg klippet på tidslinjen';
+    add.disabled = media.available === false;
     add.addEventListener('click', () => openTrackPlacementModal({
       type: 'media-import', media: [media], originalPlayhead: state.playhead
     }));
@@ -2153,6 +2224,8 @@ async function loadMediaLibrary() {
       state.mediaBin = media;
       media.forEach((item) => { if (item?.id) state.projectMediaIds.add(item.id); });
       renderMediaBin();
+      renderAllClips();
+      if (state.clips.length) setPlayhead(state.playhead);
     }
   } catch (_error) { /* mediebiblioteket är valfritt om servern inte svarar */ }
 }
@@ -3947,12 +4020,33 @@ function renderClip(clip) {
   element.style.width = `${Math.max(8, secondsToPixels(clipDuration(clip)))}px`;
   element.classList.toggle('muted', clip.kind === 'video' && clip.muted === true);
   element.classList.toggle('linked', Boolean(clip.linkGroupId));
+  const missing = clipMediaMissing(clip);
+  element.classList.toggle('media-missing', missing);
+  let missingBadge = element.querySelector('.clip-missing-badge');
+  if (missing && !missingBadge) {
+    missingBadge = document.createElement('div');
+    missingBadge.className = 'clip-missing-badge';
+    missingBadge.textContent = 'Media saknas';
+    element.appendChild(missingBadge);
+  } else if (!missing) {
+    missingBadge?.remove();
+  }
   syncClipLinkControl(element, clip);
   syncClipTransitionControl(element, clip);
   element.title = `${clip.name}\n${formatTime(clip.trimStart)}–${formatTime(clip.trimEnd)}` +
+    (missing ? '\nMedia saknas – högerklicka för att länka om' : '') +
     (clip.muted ? '\n(ljud separerat)' : '') +
     (clip.linkGroupId ? '\n🔗 Länkat – klicka på kedjan för att låsa upp' : '') +
     (clip.transitionIn ? `\n◇ ${clip.transitionIn.type} · ${clip.transitionIn.duration.toFixed(1)} s` : '');
+  if (missing) {
+    element.querySelector('.clip-waveform')?.remove();
+    element.querySelector('.clip-thumbs')?.remove();
+    setClipLoadingState(clip.id, 'waveform', false);
+    setClipLoadingState(clip.id, 'thumbnail', false);
+    setClipLoadingState(clip.id, 'media', false);
+    return;
+  }
+  const revision = mediaRevision(clip.mediaId);
   if (clip.kind === 'audio') {
     let canvas = element.querySelector('.clip-waveform');
     const displayWidth = Math.max(8, Math.round(secondsToPixels(clipDuration(clip)))) || 8;
@@ -3968,7 +4062,7 @@ function renderClip(clip) {
       canvas.style.height = '64px';
       element.insertBefore(canvas, element.firstChild);
     }
-    const waveformKey = `${clip.mediaId}:${Number(clip.trimStart).toFixed(3)}:${Number(clip.trimEnd).toFixed(3)}:${canvas.width}x${canvas.height}`;
+    const waveformKey = `${clip.mediaId}:${revision}:${Number(clip.trimStart).toFixed(3)}:${Number(clip.trimEnd).toFixed(3)}:${canvas.width}x${canvas.height}`;
     if (canvas.dataset.waveformKey !== waveformKey) {
       canvas.dataset.waveformKey = waveformKey;
       drawTimelineWaveform(canvas, clip);
@@ -3988,7 +4082,7 @@ function renderClip(clip) {
       canvas.style.height = '60px';
       element.insertBefore(canvas, element.firstChild);
     }
-    const thumbnailKey = `${clip.mediaId}:${Number(clip.trimStart).toFixed(3)}:${Number(clip.trimEnd).toFixed(3)}:${canvas.width}x${canvas.height}`;
+    const thumbnailKey = `${clip.mediaId}:${revision}:${Number(clip.trimStart).toFixed(3)}:${Number(clip.trimEnd).toFixed(3)}:${canvas.width}x${canvas.height}`;
     if (!clipNearTimelineViewport(element)) {
       canvas.dataset.thumbnailDeferred = '1';
       canvas.dataset.thumbnailKey = '';
@@ -5095,7 +5189,8 @@ function getWaveformData(mediaId, start, end, width) {
   const normalizedStart = Math.max(0, Number(start) || 0);
   const normalizedEnd = Math.max(normalizedStart + 0.01, Number(end) || normalizedStart + 0.01);
   const normalizedWidth = Math.max(32, Math.min(2000, Math.round(Number(width) || 400)));
-  const key = `${mediaId}:${normalizedStart.toFixed(3)}:${normalizedEnd.toFixed(3)}:${normalizedWidth}`;
+  const revision = mediaRevision(mediaId);
+  const key = `${mediaId}:${revision}:${normalizedStart.toFixed(3)}:${normalizedEnd.toFixed(3)}:${normalizedWidth}`;
   const cached = boundedCacheGet(waveformCache, key);
   if (cached) return cached;
   const entry = { loading: true, peaks: null, callbacks: [] };
@@ -5103,7 +5198,8 @@ function getWaveformData(mediaId, start, end, width) {
   const params = new URLSearchParams({
     start: normalizedStart.toFixed(3),
     end: normalizedEnd.toFixed(3),
-    width: String(normalizedWidth)
+    width: String(normalizedWidth),
+    revision
   });
   const url = `/api/media/${encodeURIComponent(mediaId)}/waveform?${params}`;
   waveformFetchQueue.push({ url, entry });
@@ -5179,7 +5275,8 @@ function drawTimelineThumbnails(canvas, clip) {
   const frameWidth = Math.max(32, Math.min(320, Math.round(boxW / 32) * 32));
   const clipStart = Math.max(0, Number(clip.trimStart) || 0);
   const clipEnd = Math.max(clipStart + 0.2, Number(clip.trimEnd) || clipStart + 0.2);
-  const key = `${clip.mediaId}:${frameWidth}:${count}:${clipStart.toFixed(3)}:${clipEnd.toFixed(3)}`;
+  const revision = mediaRevision(clip.mediaId);
+  const key = `${clip.mediaId}:${revision}:${frameWidth}:${count}:${clipStart.toFixed(3)}:${clipEnd.toFixed(3)}`;
   let image = boundedCacheGet(thumbnailImageCache, key);
   if (!image) {
     const startedAt = performance.now();
@@ -5206,7 +5303,7 @@ function drawTimelineThumbnails(canvas, clip) {
       ctx.textAlign = 'center';
       ctx.fillText('✕', w / 2, h / 2 + 3);
     };
-    image.src = `/api/media/${encodeURIComponent(clip.mediaId)}/thumbs?width=${frameWidth}&count=${count}&start=${clipStart.toFixed(3)}&end=${clipEnd.toFixed(3)}`;
+    image.src = `/api/media/${encodeURIComponent(clip.mediaId)}/thumbs?width=${frameWidth}&count=${count}&start=${clipStart.toFixed(3)}&end=${clipEnd.toFixed(3)}&revision=${encodeURIComponent(revision)}`;
     setClipLoadingState(clip.id, 'thumbnail', true);
     boundedCacheSet(thumbnailImageCache, key, image, MAX_THUMBNAIL_CACHE_ENTRIES);
     return;
@@ -6326,8 +6423,18 @@ function renderLayerMedia(time, playing = false) {
     return;
   }
   const top = layers[layers.length - 1];
+  if (clipMediaMissing(top)) {
+    for (const element of state.previewLayers.values()) {
+      element.hidden = true;
+      element.pause?.();
+    }
+    elements.placeholder.hidden = true;
+    setPreviewMediaStatus(`Media saknas: ${top.name}. Högerklicka på klippet för att länka om.`, 'error');
+    return;
+  }
   const usedElements = new Set();
-  for (const clip of layers) usedElements.add(layerMediaElement(clip, clip === top));
+  const availableLayers = layers.filter((clip) => !clipMediaMissing(clip));
+  for (const clip of availableLayers) usedElements.add(layerMediaElement(clip, clip === top));
   for (const [clipId, element] of state.previewLayers) {
     if (usedElements.has(element)) continue;
     element.hidden = true;
@@ -6335,17 +6442,19 @@ function renderLayerMedia(time, playing = false) {
   }
   prunePreviewLayers();
   elements.placeholder.hidden = true;
-  for (const clip of layers) {
+  for (const clip of availableLayers) {
     const isTop = clip === top;
     const element = layerMediaElement(clip, isTop);
-    const url = `/api/media/${encodeURIComponent(clip.mediaId)}/file`;
+    const url = mediaFileUrl(clip.mediaId);
+    const revision = mediaRevision(clip.mediaId);
     element.dataset.clipId = clip.id;
-    if (element.dataset.mediaId !== clip.mediaId) {
+    if (element.dataset.mediaId !== clip.mediaId || element.dataset.mediaRevision !== revision) {
       element.pause?.();
       element._playbackRetryPending = false;
       try { element.currentTime = 0; } catch (_error) { /* källan återställs vid load */ }
       element.src = url;
       element.dataset.mediaId = clip.mediaId;
+      element.dataset.mediaRevision = revision;
       setClipLoadingState(clip.id, 'media', true);
       // Explicitly restart the media pipeline when reusing the preview
       // element. Without load(), Chromium can keep the previous decoded
@@ -6386,10 +6495,12 @@ function refreshPreviewLayout() {
 
 
 function showPreview(clip, sourceTime) {
-  const url = `/api/media/${encodeURIComponent(clip.mediaId)}/file`;
-  if (elements.preview.dataset.mediaId !== clip.mediaId) {
+  const url = mediaFileUrl(clip.mediaId);
+  const revision = mediaRevision(clip.mediaId);
+  if (elements.preview.dataset.mediaId !== clip.mediaId || elements.preview.dataset.mediaRevision !== revision) {
     elements.preview.src = url;
     elements.preview.dataset.mediaId = clip.mediaId;
+    elements.preview.dataset.mediaRevision = revision;
   }
   elements.preview.hidden = false;
   elements.preview.muted = !!(clip && clip.muted === true);
@@ -6404,9 +6515,11 @@ function showPreview(clip, sourceTime) {
 function showImagePreview(clip) {
   elements.preview.pause();
   elements.preview.hidden = true;
-  if (elements.imagePreview.dataset.mediaId !== clip.mediaId) {
-    elements.imagePreview.src = `/api/media/${encodeURIComponent(clip.mediaId)}/file`;
+  const revision = mediaRevision(clip.mediaId);
+  if (elements.imagePreview.dataset.mediaId !== clip.mediaId || elements.imagePreview.dataset.mediaRevision !== revision) {
+    elements.imagePreview.src = mediaFileUrl(clip.mediaId);
     elements.imagePreview.dataset.mediaId = clip.mediaId;
+    elements.imagePreview.dataset.mediaRevision = revision;
   }
   elements.imagePreview.hidden = false;
   elements.placeholder.hidden = true;
@@ -6434,7 +6547,7 @@ function preloadUpcomingMedia(time) {
   if (now - state.lastMediaPreloadAt < 250) return;
   state.lastMediaPreloadAt = now;
   const upcoming = state.clips
-    .filter((clip) => ['video', 'audio', 'image'].includes(clip.kind) && clip.start > time && clip.start - time <= 4)
+    .filter((clip) => ['video', 'audio', 'image'].includes(clip.kind) && !clipMediaMissing(clip) && clip.start > time && clip.start - time <= 4)
     .sort((a, b) => a.start - b.start)
     .slice(0, 6);
   const wanted = new Set(upcoming.map((clip) => clip.mediaId));
@@ -6459,7 +6572,7 @@ function preloadUpcomingMedia(time) {
       element.dataset.preloadState = 'error';
       updatePreloadStatus();
     }, { once: true });
-    element.src = `/api/media/${encodeURIComponent(clip.mediaId)}/file`;
+    element.src = mediaFileUrl(clip.mediaId);
     state.mediaPreloaders.set(clip.mediaId, element);
   }
   updatePreloadStatus();
@@ -6632,7 +6745,7 @@ function syncPlaybackMedia(time) {
   renderTranscriptOverlay(time);
 
   const activeAudio = state.clips.filter((clip) =>
-    clip.kind === 'audio' && time >= clip.start && time < clip.start + clipDuration(clip)
+    clip.kind === 'audio' && !clipMediaMissing(clip) && time >= clip.start && time < clip.start + clipDuration(clip)
   );
   const activeIds = new Set(activeAudio.map((clip) => clip.id));
   for (const [clipId, player] of state.timelineAudioPlayers) {
@@ -6653,15 +6766,17 @@ function syncPlaybackMedia(time) {
     player.volume = 1;
     const sourceTime = audio.trimStart + time - audio.start;
     const targetTime = clamp(sourceTime, 0, audio.mediaDuration);
-    const changed = player.dataset.mediaId !== audio.mediaId;
+    const revision = mediaRevision(audio.mediaId);
+    const changed = player.dataset.mediaId !== audio.mediaId || player.dataset.mediaRevision !== revision;
     const seek = () => {
       playMediaElementWhenReady(player);
     };
     if (changed) {
       player.pause();
       player._playbackRetryPending = false;
-      player.src = `/api/media/${encodeURIComponent(audio.mediaId)}/file`;
+      player.src = mediaFileUrl(audio.mediaId);
       player.dataset.mediaId = audio.mediaId;
+      player.dataset.mediaRevision = revision;
       // Calling load() after changing src makes the source switch reliable
       // for detached/hidden audio elements (notably Chromium after a clip
       // boundary).  jsdom does not implement load(), so skip it there.

@@ -10,6 +10,8 @@ const tests = [
   'still-frame-test.js',
   'bugfix-regression-test.js',
   'media-performance-guards-test.js',
+  'media-relink-server-test.js',
+  'media-relink-ui-test.js',
   'project-json-roundtrip-test.js',
   'ai-upscale-test.js',
   'export-render-test.js',

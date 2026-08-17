@@ -172,7 +172,7 @@ function runDirectoryPickerCommand(command, args) {
       if (spawnFailed) return;
       if (code === 0) return resolve(stdout.trim() || null);
       if (code === 1) return resolve(null);
-      reject(new Error(`${command} kunde inte välja mapp (kod ${code}). ${stderr.trim()}`));
+      reject(new Error(`${command} kunde inte slutföra filvalet (kod ${code}). ${stderr.trim()}`));
     });
   });
 }
@@ -333,6 +333,75 @@ function mediaFilePath(item) {
   const filePath = path.resolve(UPLOAD_DIR, item.storedName);
   if (path.dirname(filePath) !== path.resolve(UPLOAD_DIR)) throw badRequest('Mediefilens sökväg är ogiltig.');
   return filePath;
+}
+
+function mediaItemAvailability(item, exists = fs.existsSync) {
+  try {
+    const candidate = item?.sourcePath
+      ? path.resolve(String(item.sourcePath))
+      : item?.storedName && path.basename(item.storedName) === item.storedName
+        ? path.resolve(UPLOAD_DIR, item.storedName)
+        : null;
+    return Boolean(candidate && exists(candidate));
+  } catch (_error) {
+    return false;
+  }
+}
+
+function mediaItemForClient(item) {
+  return { ...item, available: mediaItemAvailability(item) };
+}
+
+async function relinkMediaItem(item, selectedPath, options = {}, dependencies = {}) {
+  if (!item?.id) throw badRequest('Medieposten är ogiltig.');
+  const realpath = dependencies.realpath || fsp.realpath.bind(fsp);
+  const statFile = dependencies.stat || fsp.stat.bind(fsp);
+  const probe = dependencies.probe || probeMedia;
+  const absolutePath = await realpath(path.resolve(String(selectedPath || '')));
+  const stat = await statFile(absolutePath);
+  if (!stat.isFile()) throw badRequest('Den valda sökvägen är inte en fil.');
+  if (stat.size > MAX_UPLOAD_BYTES) throw badRequest('Filen är för stor.');
+  const extension = path.extname(absolutePath).toLowerCase();
+  if (!ALLOWED_EXTENSIONS.has(extension)) throw badRequest('Filtypen stöds inte.');
+  const metadata = await probe(absolutePath, extension);
+  if (metadata.kind !== item.kind) {
+    throw badRequest(`Välj samma mediatyp som originalet (${item.kind}).`);
+  }
+  const requiredDuration = Math.max(0, Number(options.requiredDuration) || 0);
+  if (item.kind !== 'image' && requiredDuration > 0 && Number(metadata.duration) + 0.05 < requiredDuration) {
+    throw badRequest(`Ersättningsfilen är för kort. Minst ${requiredDuration.toFixed(2)} sekunder krävs.`);
+  }
+  const updated = {
+    ...item,
+    name: path.basename(absolutePath).slice(0, 200),
+    sourcePath: absolutePath,
+    storedName: path.basename(absolutePath),
+    size: stat.size,
+    ...metadata,
+    relinkedAt: new Date().toISOString()
+  };
+  delete updated.contentHash;
+  delete updated.metadataProbeError;
+  return updated;
+}
+
+function replacementMediaPickerCommands() {
+  return [
+    ['zenity', ['--file-selection', '--title=Länka om media']],
+    ['kdialog', ['--getopenfilename', '.', '* Mediafiler | *.mp4 *.mov *.mkv *.avi *.webm *.mp3 *.wav *.m4a *.jpg *.jpeg *.png *.webp *.svg']]
+  ];
+}
+
+async function chooseReplacementMediaFile(pickers = replacementMediaPickerCommands()) {
+  const errors = [];
+  for (const [command, args] of pickers) {
+    try {
+      return await runDirectoryPickerCommand(command, args);
+    } catch (error) {
+      errors.push(`${command}: ${error.message}`);
+    }
+  }
+  throw new Error(`Ingen filväljare kunde startas. ${errors.join(' · ')}`);
 }
 
 async function registerExternalMedia(filePath) {
@@ -744,7 +813,7 @@ app.get('/api/status', async (_request, response) => {
   });
 });
 
-app.get('/api/media', (_request, response) => response.json([...mediaLibrary.values()]));
+app.get('/api/media', (_request, response) => response.json([...mediaLibrary.values()].map(mediaItemForClient)));
 
 app.post('/api/media/select', async (request, response, next) => {
   const address = request.socket.remoteAddress || '';
@@ -756,6 +825,32 @@ app.post('/api/media/select', async (request, response, next) => {
     const media = [];
     for (const file of files) media.push(await registerExternalMedia(file));
     response.status(201).json({ cancelled: false, media });
+  } catch (error) {
+    if (!error.status) error.status = 400;
+    next(error);
+  }
+});
+
+app.post('/api/media/:id/relink', async (request, response, next) => {
+  const address = request.socket.remoteAddress || '';
+  const loopback = address === '::1' || address === '127.0.0.1' || address.startsWith('::ffff:127.');
+  if (!loopback) return response.status(403).json({ error: 'Omlänkning är endast tillgänglig lokalt.' });
+  const original = mediaLibrary.get(request.params.id);
+  if (!original) return response.status(404).json({ error: 'Mediefilen finns inte i biblioteket.' });
+  try {
+    const selectedPath = await chooseReplacementMediaFile();
+    if (!selectedPath) return response.json({ cancelled: true });
+    const updated = await relinkMediaItem(original, selectedPath, {
+      requiredDuration: request.body?.requiredDuration
+    });
+    mediaLibrary.set(original.id, updated);
+    try {
+      await saveLibrary();
+    } catch (error) {
+      mediaLibrary.set(original.id, original);
+      throw error;
+    }
+    response.json({ cancelled: false, media: mediaItemForClient(updated) });
   } catch (error) {
     if (!error.status) error.status = 400;
     next(error);
@@ -841,7 +936,7 @@ app.get('/api/media/:id/waveform', async (request, response, next) => {
     const end = clamp(Number.isFinite(requestedEnd) ? requestedEnd : (item.duration || MAX_DURATION), start, item.duration || MAX_DURATION);
     const duration = end - start;
     if (duration <= 0) throw badRequest('Waveformens intervall är tomt.');
-    const cacheKey = `${item.id}:${start.toFixed(3)}:${end.toFixed(3)}`;
+    const cacheKey = `${item.id}:${item.relinkedAt || ''}:${start.toFixed(3)}:${end.toFixed(3)}`;
     let analysis = waveformCache.get(cacheKey);
     if (!analysis) {
       const analysisWidth = 2000;
@@ -906,7 +1001,7 @@ app.get('/api/media/:id/thumbs', async (request, response, next) => {
     const start = Number.isFinite(requestedStart) ? clamp(requestedStart, 0, duration) : 0;
     const end = Number.isFinite(requestedEnd) ? clamp(requestedEnd, start, duration) : duration;
     if (end - start < 0.2) throw badRequest('Klippintervallet är för kort för stillbilder.');
-    const key = `${item.id}:${frameWidth}:${count}:${start.toFixed(3)}:${end.toFixed(3)}`;
+    const key = `${item.id}:${item.relinkedAt || ''}:${frameWidth}:${count}:${start.toFixed(3)}:${end.toFixed(3)}`;
     const cached = thumbnailCache.get(key);
     if (cached) {
       console.log(`[THUMBS] cache-träff ${item.name} · ${count} rutor · ${frameWidth}px · ${start.toFixed(1)}–${end.toFixed(1)}s`);
@@ -2968,6 +3063,10 @@ module.exports = {
   runDirectoryPickerCommand,
   pickOutputDirectory,
   outputDirectoryPickerCommands,
+  mediaItemAvailability,
+  relinkMediaItem,
+  chooseReplacementMediaFile,
+  replacementMediaPickerCommands,
   mediaMetadataNeedsRefresh,
   buildVisualSizeFilter,
   buildVisualContentFilter,
