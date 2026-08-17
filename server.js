@@ -177,22 +177,30 @@ function runDirectoryPickerCommand(command, args) {
   });
 }
 
-async function pickOutputDirectory() {
-  const pickers = [
-    ['zenity', ['--file-selection', '--directory', '--title=Välj output-mapp']],
-    ['kdialog', ['--getexistingdirectory', '.', '--title', 'Välj output-mapp']]
-  ];
+async function pickOutputDirectory(pickers = outputDirectoryPickerCommands()) {
+  const errors = [];
   for (const [command, args] of pickers) {
     try {
       return await runDirectoryPickerCommand(command, args);
     } catch (error) {
-      if (error.code === 'ENOENT') continue;
-      throw error;
+      errors.push(`${command}: ${error.message}`);
     }
   }
-  const error = new Error('Ingen mappväljare hittades. Installera zenity eller kdialog.');
+  const error = new Error(
+    errors.length > 0
+      ? `Ingen mappväljare kunde startas. ${errors.join(' · ')}`
+      : 'Ingen mappväljare hittades. Installera Python Tkinter, Zenity eller KDialog.'
+  );
   error.status = 501;
   throw error;
+}
+
+function outputDirectoryPickerCommands() {
+  return [
+    ['python3', [path.join(ROOT, 'pick_directory.py'), '--title', 'Välj output-mapp']],
+    ['zenity', ['--file-selection', '--directory', '--title=Välj output-mapp']],
+    ['kdialog', ['--getexistingdirectory', '.', '--title', 'Välj output-mapp']]
+  ];
 }
 
 function pruneOutputDirectorySelections(now = Date.now()) {
@@ -2957,6 +2965,9 @@ module.exports = {
   TaskQueue,
   AUDIO_MIX_LIMITER,
   filesHaveSameContent,
+  runDirectoryPickerCommand,
+  pickOutputDirectory,
+  outputDirectoryPickerCommands,
   mediaMetadataNeedsRefresh,
   buildVisualSizeFilter,
   buildVisualContentFilter,

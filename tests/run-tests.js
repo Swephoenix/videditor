@@ -18,6 +18,7 @@ const tests = [
   'export-fps-test.js',
   'export-storage-test.js',
   'export-output-folder-test.js',
+  'directory-picker-test.js',
   'gpu-export-input-test.js',
   'webm-alpha-test.js',
   'multitrack-test.js',
