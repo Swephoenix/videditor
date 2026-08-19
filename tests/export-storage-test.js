@@ -20,6 +20,16 @@ assert(
   required > 1_517_408_256,
   `Lång lossless-export uppskattades till för lite utrymme: ${required} byte.`
 );
+assert(
+  required < 15 * 1024 ** 3,
+  `Lossless-exporten överskattas orimligt mycket: ${required} byte.`
+);
+
+const upscaledRequired = estimateExportStorageBytes({ ...longLosslessProject, upscale: true });
+assert(
+  upscaledRequired > required,
+  'Uppskalad export måste reservera mer arbetsutrymme än vanlig export.'
+);
 
 assert.throws(
   () => ensureExportStorage(longLosslessProject, 1_517_408_256, 0),

@@ -1698,11 +1698,13 @@ function estimateExportStorageBytes(project) {
   const quality = project?.upscale
     ? 5
     : Math.round(clamp(Number(project?.quality) || 5, 1, 5));
-  const frameRate = chooseProjectFrameRate(project?.clips || []);
   const resolutionScale = Math.max(0.2, (width * height) / (1920 * 1080));
-  const videoBytes = quality === 5
-    ? duration * width * height * 1.5 * frameRate * 1.05
-    : duration * [0, 2, 5, 10, 25][quality] * 1_000_000 * resolutionScale / 8;
+  // NVENC lossless is still H.264 and does not write one raw YUV frame per
+  // frame.  Reserving raw-frame storage here caused a 29-minute 720p export
+  // to be rejected as a 67 GB job even though comparable exports were ~2 GB.
+  // Keep a deliberately conservative encoded bitrate ceiling instead.
+  const bitrateAt1080p = [0, 2, 5, 10, 25, 60][quality] * 1_000_000;
+  const videoBytes = duration * bitrateAt1080p * resolutionScale / 8;
   const audioBytes = duration * 192000 / 8;
   const encodedBytes = (videoBytes + audioBytes) * 1.12;
   const workingCopies = project?.upscale ? 3 : 1;
