@@ -13,9 +13,9 @@
     <input id="project-input" type="file" accept=".json" hidden>
 
     <div class="toolbar-actions">
-      <button id="new-project" class="toolbar-btn" title="Nytt projekt">New</button>
-      <button id="save-project" class="toolbar-btn" title="Spara projekt">💾</button>
-      <button id="load-project" class="toolbar-btn" title="Öppna projekt">📂</button>
+      <button id="new-project" class="toolbar-btn" title="Nytt projekt">Nytt</button>
+      <button id="save-project" class="toolbar-btn" title="Spara projekt" aria-label="Spara projekt"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 3h13l3 3v15H4z M7 3v6h9V3 M7 21v-8h10v8"/></svg></button>
+      <button id="load-project" class="toolbar-btn" title="Öppna projekt" aria-label="Öppna projekt"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 19V5h7l2 2h8v3 M3 19l3-9h15l-3 9z"/></svg></button>
     </div>
 
     <button id="import-files" class="toolbar-btn" title="Välj mediafiler från datorn utan att kopiera dem">Importera filer</button>
@@ -52,7 +52,9 @@
 
     <div class="menu">
       <button class="menu-toggle" aria-haspopup="true" aria-expanded="false">Export ▾</button>
-      <div class="menu-dropdown">
+      <div class="menu-dropdown export-panel">
+        <div class="export-settings">
+        <strong class="export-heading">Exportinställningar</strong>
         <label class="menu-item canvas-format-control">Videoformat
           <select id="canvas-format">
             <option value="source">Källformat</option>
@@ -82,10 +84,14 @@
         <label class="hardware menu-item" title="Bränn in transkriberingen som undertexter längst ner i videon">
           <input id="export-subtitles" type="checkbox"> Exportera undertexter
         </label>
+        </div>
+        <div class="export-actions">
+        <strong class="export-heading">Exportera</strong>
         <button class="export" id="export">Exportera MP4</button>
         <button id="export-selection" disabled title="Markera klipp eller ange ett IN/UT-segment först">Exportera val som MP4</button>
         <button id="export-mp3">Exportera ljud som MP3</button>
         <button id="export-wav">Exportera ljud som WAV</button>
+        </div>
       </div>
     </div>
 
@@ -383,6 +389,33 @@
         <svg width="20" height="20" aria-hidden="true"><use href="#icon-play"></use></svg>
       </button>
     </div>
+    <div class="quick-tool-group" role="group" aria-label="Klipp och tidslinje">
+    <button class="quick-tool" id="qt-split" title="Dela vid spelhuvud (S)">
+      <svg width="20" height="20" aria-hidden="true"><use href="#icon-split-playhead"></use></svg>
+      <span>Dela</span>
+    </button>
+    <button class="quick-tool" id="qt-segment-copy" title="Markera och kopiera ett segment" aria-pressed="false">
+      <svg width="20" height="20" aria-hidden="true"><use href="#icon-segment-copy"></use></svg>
+      <span>Segment</span>
+    </button>
+    <button class="quick-tool" id="qt-remove" title="Ta bort markerat klipp (Delete)" disabled>
+      <svg width="20" height="20" aria-hidden="true"><use href="#icon-delete"></use></svg>
+      <span>Ta bort</span>
+    </button>
+    <button class="quick-tool" id="qt-crop" title="Beskär video">
+      <svg width="20" height="20" aria-hidden="true"><use href="#icon-crop"></use></svg>
+      <span>Beskär</span>
+    </button>
+    <button class="quick-tool" id="qt-transition" title="Markera exakt två video- eller bildklipp" disabled>
+      <span class="transition-tool-icon" aria-hidden="true">◇</span>
+      <span>Övergång</span>
+    </button>
+    <button class="quick-tool" id="qt-link" title="Länka markerat video- och ljudklipp" disabled>
+      <img class="chain-tool-icon" src="/chain.svg?v=0.17.7" alt="" aria-hidden="true">
+      <span>Länka</span>
+    </button>
+    </div>
+    <div class="quick-tool-group" role="group" aria-label="Innehåll och effekter">
     <button class="quick-tool" id="qt-blur" title="Lägg till blur (B)">
       <svg width="20" height="20" aria-hidden="true"><use href="#icon-blur"></use></svg>
       <span>Blur</span>
@@ -407,14 +440,8 @@
       <svg width="20" height="20" aria-hidden="true"><use href="#icon-still-frame"></use></svg>
       <span>Stillbild</span>
     </button>
-    <button class="quick-tool" id="qt-split" title="Dela vid spelhuvud (S)">
-      <svg width="20" height="20" aria-hidden="true"><use href="#icon-split-playhead"></use></svg>
-      <span>Dela</span>
-    </button>
-    <button class="quick-tool" id="qt-segment-copy" title="Markera och kopiera ett segment" aria-pressed="false">
-      <svg width="20" height="20" aria-hidden="true"><use href="#icon-segment-copy"></use></svg>
-      <span>Segment</span>
-    </button>
+    </div>
+    <div class="quick-tool-group" role="group" aria-label="Flaggor">
     <button class="quick-tool" id="qt-flag" title="Visa och sök bland flaggor" aria-haspopup="true" aria-expanded="false">
       <svg width="20" height="20" aria-hidden="true"><use href="#icon-flag"></use></svg>
       <span>Flaggor</span>
@@ -425,22 +452,7 @@
     <button class="quick-tool flag-nav" id="qt-flag-next" title="Hoppa till nästa flagga">
       <span aria-hidden="true">▶</span>
     </button>
-    <button class="quick-tool" id="qt-remove" title="Ta bort markerat klipp (Delete)" disabled>
-      <svg width="20" height="20" aria-hidden="true"><use href="#icon-delete"></use></svg>
-      <span>Ta bort</span>
-    </button>
-    <button class="quick-tool" id="qt-crop" title="Beskär video">
-      <svg width="20" height="20" aria-hidden="true"><use href="#icon-crop"></use></svg>
-      <span>Beskär</span>
-    </button>
-    <button class="quick-tool" id="qt-transition" title="Markera exakt två video- eller bildklipp" disabled>
-      <span class="transition-tool-icon" aria-hidden="true">◇</span>
-      <span>Övergång</span>
-    </button>
-    <button class="quick-tool" id="qt-link" title="Länka markerat video- och ljudklipp" disabled>
-      <img class="chain-tool-icon" src="/chain.svg?v=0.17.7" alt="" aria-hidden="true">
-      <span>Länka</span>
-    </button>
+    </div>
     </div>
     <button class="quick-tool canvas-tool" id="qt-canvas" title="Exportytans storlek (bredd/höjd)" aria-haspopup="true" aria-expanded="false">
       <svg width="20" height="20" aria-hidden="true"><use href="#icon-canvas"></use></svg>

@@ -4,6 +4,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const tests = [
+  'ui-layout-test.js',
   'timeline-track-model-test.js',
   'segment-clipboard-model-test.js',
   'segment-clipboard-ui-test.js',

@@ -3022,7 +3022,7 @@ async function startServer() {
     });
     server.once('error', reject);
   });
-  const editorServer = await listen(PORT, '0.0.0.0', `Videoeditorn kör på http://localhost:${PORT}`);
+  const editorServer = await listen(PORT, process.env.HOST || '0.0.0.0', `Videoeditorn kör på http://localhost:${PORT}`);
   return editorServer;
 }
 

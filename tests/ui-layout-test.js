@@ -1,0 +1,15 @@
+'use strict';
+const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+const { JSDOM } = require('jsdom');
+const root = path.resolve(__dirname, '..');
+const doc = new JSDOM(fs.readFileSync(path.join(root, 'index.html'), 'utf8')).window.document;
+assert.equal(doc.querySelector('#new-project').textContent.trim(), 'Nytt');
+assert(doc.querySelector('[aria-label="Klipp och tidslinje"] #qt-split'));
+assert(doc.querySelector('[aria-label="Innehåll och effekter"] #qt-text'));
+assert(doc.querySelector('.export-settings #export-quality'));
+assert(doc.querySelector('.export-actions #export'));
+assert(doc.querySelector('.export-actions #export-wav'));
+assert.equal(doc.querySelector('#save-project').getAttribute('aria-label'), 'Spara projekt');
+console.log('UI LAYOUT OK');
