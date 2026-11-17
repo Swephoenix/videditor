@@ -1443,16 +1443,11 @@ app.post('/api/export', async (request, response, next) => {
     const outputDirectory = request.body.outputDirectoryToken
       ? await resolveOutputDirectorySelection(request.body.outputDirectoryToken)
       : EXPORT_DIR;
-    const availableBytes = await availableExportBytes(outputDirectory);
-    const reservedBytes = [...jobs.values()]
-      .filter((candidate) => ['queued', 'rendering', 'upscaling'].includes(candidate.status))
-      .reduce((total, candidate) => total + (Number(candidate.reservedBytes) || 0), 0);
-    const requiredBytes = ensureExportStorage(project, availableBytes, reservedBytes);
     const id = crypto.randomUUID();
     const outputFileName = createExportFilename(project.format, id);
     const job = {
       id, format: project.format, status: 'queued', progress: 0,
-      createdAt: new Date().toISOString(), reservedBytes: requiredBytes,
+      createdAt: new Date().toISOString(),
       outputDirectory, outputFileName,
       targetOutputPath: path.join(outputDirectory, outputFileName)
     };
@@ -1465,12 +1460,12 @@ app.post('/api/export', async (request, response, next) => {
       } catch (error) {
         if (job.aborted) return;
         Object.assign(job, {
-          status: 'failed', reservedBytes: 0,
+          status: 'failed',
           error: error.message || 'Exporten kunde inte startas.'
         });
       }
     }).catch((error) => {
-      if (!job.aborted) Object.assign(job, { status: 'failed', reservedBytes: 0, error: error.message });
+      if (!job.aborted) Object.assign(job, { status: 'failed', error: error.message });
     });
   } catch (error) {
     next(error);
@@ -1499,7 +1494,6 @@ app.post('/api/jobs/:id/cancel', (request, response) => {
     return response.json({ status: job.status });
   }
   Object.assign(job, { aborted: true, status: 'cancelled', progress: job.progress || 0, message: 'Avbruten av användaren.' });
-  job.reservedBytes = 0;
   const pid = job.encodePid;
   if (pid) {
     try { process.kill(pid, 'SIGKILL'); } catch (_error) { /* redan död */ }
@@ -1709,30 +1703,6 @@ function estimateExportStorageBytes(project) {
   const encodedBytes = (videoBytes + audioBytes) * 1.12;
   const workingCopies = project?.upscale ? 3 : 1;
   return Math.ceil(encodedBytes * workingCopies + EXPORT_SAFETY_BYTES);
-}
-
-function formatStorage(bytes) {
-  const gibibytes = Math.max(0, Number(bytes) || 0) / (1024 ** 3);
-  return `${gibibytes.toFixed(gibibytes < 10 ? 1 : 0)} GB`;
-}
-
-function ensureExportStorage(project, availableBytes, reservedBytes = 0) {
-  const requiredBytes = estimateExportStorageBytes(project);
-  const usableBytes = Math.max(0, Number(availableBytes) - Math.max(0, Number(reservedBytes) || 0));
-  if (!Number.isFinite(usableBytes) || usableBytes < requiredBytes) {
-    const error = new Error(
-      `För lite ledigt diskutrymme: exporten behöver cirka ${formatStorage(requiredBytes)}, ` +
-      `men ${formatStorage(usableBytes)} är ledigt. Frigör utrymme eller välj lägre kvalitet.`
-    );
-    error.status = 507;
-    throw error;
-  }
-  return requiredBytes;
-}
-
-async function availableExportBytes(directory = EXPORT_DIR) {
-  const stats = await fsp.statfs(directory);
-  return Number(stats.bavail) * Number(stats.bsize);
 }
 
 function ffmpegFailureMessage(code, stderr) {
@@ -2358,18 +2328,18 @@ function trackFfmpegProgress(child, job, duration, outputPath) {
   child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString()).slice(-8000); });
   child.on('error', (error) => {
     spawnError = error;
-    Object.assign(job, { status: 'failed', reservedBytes: 0, error: error.message });
+    Object.assign(job, { status: 'failed', error: error.message });
     fsp.unlink(outputPath).catch(() => {});
   });
   return new Promise((resolve) => {
     child.on('close', (code) => {
       if (job.aborted || spawnError) return resolve(false);
       if (code !== 0) {
-        Object.assign(job, { status: 'failed', reservedBytes: 0, error: ffmpegFailureMessage(code, stderr) });
+        Object.assign(job, { status: 'failed', error: ffmpegFailureMessage(code, stderr) });
         fsp.unlink(outputPath).catch(() => {});
         return resolve(false);
       }
-      Object.assign(job, { status: 'completed', progress: 100, outputPath, reservedBytes: 0 });
+      Object.assign(job, { status: 'completed', progress: 100, outputPath });
       resolve(true);
     });
   });
@@ -2928,7 +2898,7 @@ async function renderProject(jobId, project) {
     let spawnError = null;
     child.on('error', (error) => {
       spawnError = error;
-      Object.assign(job, { status: 'failed', reservedBytes: 0, error: error.message });
+      Object.assign(job, { status: 'failed', error: error.message });
       fsp.unlink(outputPath).catch(() => {});
       cleanupTextFiles();
     });
@@ -2940,14 +2910,14 @@ async function renderProject(jobId, project) {
       }
       if (spawnError) return resolve();
       if (code !== 0) {
-        Object.assign(job, { status: 'failed', reservedBytes: 0, error: ffmpegFailureMessage(code, stderr) });
+        Object.assign(job, { status: 'failed', error: ffmpegFailureMessage(code, stderr) });
         await fsp.unlink(outputPath).catch(() => {});
         cleanupTextFiles();
         return resolve();
       }
       cleanupTextFiles();
       if (!project.upscale) {
-        Object.assign(job, { status: 'completed', progress: 100, outputPath, reservedBytes: 0 });
+        Object.assign(job, { status: 'completed', progress: 100, outputPath });
         return resolve();
       }
       await runUpscaleStep(jobId, project, outputPath);
@@ -2976,7 +2946,7 @@ async function renderProject(jobId, project) {
         return;
       }
       await fsp.unlink(renderedPath).catch(() => {});
-      Object.assign(job, { status: 'completed', progress: 100, outputPath: upscaledPath, reservedBytes: 0 });
+      Object.assign(job, { status: 'completed', progress: 100, outputPath: upscaledPath });
     } catch (error) {
       if (job.aborted) {
         await Promise.all([
@@ -2986,7 +2956,7 @@ async function renderProject(jobId, project) {
         return;
       }
       await fsp.unlink(upscaledPath).catch(() => {});
-      Object.assign(job, { status: 'failed', error: error.message, reservedBytes: 0 });
+      Object.assign(job, { status: 'failed', error: error.message });
     }
   }
 
@@ -3082,7 +3052,6 @@ module.exports = {
   cancellableDelay,
   probeMedia,
   estimateExportStorageBytes,
-  ensureExportStorage,
   createExportFilename,
   rememberOutputDirectory,
   resolveOutputDirectorySelection,

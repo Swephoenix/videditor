@@ -5,6 +5,7 @@ const { spawnSync } = require('child_process');
 
 const tests = [
   'ui-layout-test.js',
+  'drop-import-test.js',
   'timeline-track-model-test.js',
   'segment-clipboard-model-test.js',
   'segment-clipboard-ui-test.js',
@@ -20,6 +21,8 @@ const tests = [
   'export-safety-test.js',
   'export-fps-test.js',
   'export-storage-test.js',
+  'export-no-estimate-block-test.js',
+  'export-default-quality-test.js',
   'export-output-folder-test.js',
   'directory-picker-test.js',
   'z-layer-test.js',

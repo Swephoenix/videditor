@@ -1,0 +1,18 @@
+'use strict';
+const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+const { JSDOM } = require('jsdom');
+const { estimateExportStorageBytes } = require('../server');
+const root = path.resolve(__dirname, '..');
+const doc = new JSDOM(fs.readFileSync(path.join(root, 'index.html'), 'utf8')).window.document;
+const quality = Number(doc.querySelector('#export-quality').value);
+assert.equal(quality, 3, 'Export ska börja med standardkvalitet.');
+assert.match(doc.querySelector('#quality-label').textContent, /standard/i);
+assert.match(doc.querySelector('#quality-storage-hint').textContent, /förlustfri.*stora filer/i);
+const project = { format: 'mp4', duration: 7485, canvas: { width: 1920, height: 1080 }, upscale: false };
+const defaultSize = estimateExportStorageBytes({ ...project, quality });
+const losslessSize = estimateExportStorageBytes({ ...project, quality: 5 });
+assert(defaultSize < 12 * 1024 ** 3);
+assert(losslessSize > defaultSize * 4);
+console.log('EXPORT DEFAULT QUALITY OK');

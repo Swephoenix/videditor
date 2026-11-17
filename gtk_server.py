@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -14,18 +15,26 @@ class EditorServer:
         self.node = node
         self.process = None
         self.log = None
+        self._lock = threading.Lock()
+        self._stopping = False
 
     def start(self, timeout=30):
+        with self._lock:
+            if self._stopping:
+                raise RuntimeError('Serverstarten avbröts.')
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]
         env = os.environ.copy()
         env.update(PORT=str(port), HOST='127.0.0.1')
         (ROOT / '.runtime').mkdir(exist_ok=True)
-        self.log = open(ROOT / '.runtime' / 'gtk-server.log', 'a', encoding='utf-8')
         try:
-            self.process = subprocess.Popen([self.node, str(ROOT / 'server.js')], cwd=ROOT,
-                                            env=env, stdout=self.log, stderr=subprocess.STDOUT)
+            with self._lock:
+                if self._stopping:
+                    raise RuntimeError('Serverstarten avbröts.')
+                self.log = open(ROOT / '.runtime' / 'gtk-server.log', 'a', encoding='utf-8')
+                self.process = subprocess.Popen([self.node, str(ROOT / 'server.js')], cwd=ROOT,
+                                                env=env, stdout=self.log, stderr=subprocess.STDOUT)
             url = f'http://127.0.0.1:{port}/'
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
@@ -43,12 +52,14 @@ class EditorServer:
             raise
 
     def stop(self):
-        if self.process and self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait()
-        if self.log and not self.log.closed:
-            self.log.close()
+        with self._lock:
+            self._stopping = True
+            if self.process and self.process.poll() is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait()
+            if self.log and not self.log.closed:
+                self.log.close()

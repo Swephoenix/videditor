@@ -72,9 +72,10 @@
           <label>Höjd <input id="canvas-height" type="number" min="64" max="4096" step="2" value="1080"></label>
         </div>
         <label class="hardware menu-item">Kvalitet
-          <output id="quality-label">5 – lossless</output>
-          <input id="export-quality" type="range" min="1" max="5" step="1" value="5">
-          <span class="quality-range-label">1 (låg) – 5 (lossless)</span>
+          <output id="quality-label">3 – standard</output>
+          <input id="export-quality" type="range" min="1" max="5" step="1" value="3" aria-describedby="quality-storage-hint">
+          <span class="quality-range-label">1 (låg) – 5 (förlustfri)</span>
+          <span class="quality-storage-hint" id="quality-storage-hint">Förlustfri kvalitet kan ge mycket stora filer.</span>
         </label>
         <label class="hardware menu-item" title="MP4-export kräver NVIDIA GPU"><input id="use-nvidia" type="checkbox" checked disabled> NVIDIA NVENC-kodning (obligatorisk)</label>
         <label class="hardware menu-item"><input id="use-upscale" type="checkbox"> Snabb AI super-resolution 2×</label>

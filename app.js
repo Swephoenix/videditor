@@ -547,28 +547,81 @@ elements.exportSubtitles.addEventListener('change', updateAutoFitLabel);
 const SUPPORTED_TYPES = ['video/', 'audio/', 'image/jpeg', 'image/png', 'image/webp', 'image/bmp', 'image/tiff', 'image/svg+xml'];
 
 let dragActive = false;
+function clearMediaDrag() {
+  dragActive = false;
+  document.body.classList.remove('drag-over');
+}
 document.addEventListener('dragenter', () => {
   if (!dragActive) { dragActive = true; document.body.classList.add('drag-over'); }
 });
 document.addEventListener('dragleave', (e) => {
   if (e.clientX <= 0 || e.clientY <= 0 || e.clientX >= window.innerWidth || e.clientY >= window.innerHeight) {
-    dragActive = false; document.body.classList.remove('drag-over');
+    clearMediaDrag();
   }
 });
 document.addEventListener('dragover', (e) => e.preventDefault());
-document.addEventListener('drop', (e) => {
+// WebKit can provide an empty or generic MIME type for files dragged from the file manager.
+const SUPPORTED_EXTENSIONS = new Set(['mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v', 'mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus', 'jpg', 'jpeg', 'png', 'webp', 'bmp', 'tif', 'tiff', 'svg']);
+function isSupportedDroppedFile(file) {
+  const type = (file.type || '').toLowerCase();
+  if (SUPPORTED_TYPES.some(prefix => type.startsWith(prefix))) return true;
+  const extension = (file.name || '').split('.').pop().toLowerCase();
+  return (!type || type === 'application/octet-stream') && SUPPORTED_EXTENSIONS.has(extension);
+}
+
+document.addEventListener('drop', async (e) => {
   e.preventDefault();
-  dragActive = false;
-  document.body.classList.remove('drag-over');
-  const files = Array.from(e.dataTransfer.files);
-  for (const file of files) {
-    if (!SUPPORTED_TYPES.some(t => file.type.startsWith(t))) {
-      elements.status.textContent = `${file.name} stöds inte`;
-      continue;
+  clearMediaDrag();
+  const files = Array.from(e.dataTransfer?.files || []);
+  if (!files.length) {
+    elements.status.textContent = 'Inga filer kunde läsas från släppet. Prova Importera filer.';
+    return;
+  }
+  const supported = files.filter(isSupportedDroppedFile);
+  const unsupported = files.filter(file => !isSupportedDroppedFile(file));
+  if (!supported.length) {
+    elements.status.textContent = 'Filformatet stöds inte.';
+    return;
+  }
+  if (!ensureProjectNamed()) return;
+  const media = [];
+  const failures = [];
+  const originalPlayhead = state.playhead;
+  for (const file of supported) {
+    elements.status.textContent = `Laddar ${file.name}…`;
+    try {
+      const form = new FormData();
+      form.append('media', file);
+      media.push(await api('/api/media', { method: 'POST', body: form }));
+    } catch (error) {
+      failures.push(`${file.name}: ${error.message}`);
     }
-    uploadMedia(file);
+  }
+  if (media.length) {
+    openTrackPlacementModal({ type: 'media-import', media, originalPlayhead });
+    elements.status.textContent = 'Välj spår för att slutföra importen.';
+  }
+  if (unsupported.length || failures.length) {
+    const messages = [...unsupported.map(file => `${file.name}: formatet stöds inte`), ...failures];
+    elements.status.textContent = `Vissa filer kunde inte importeras: ${messages.join('; ')}`;
   }
 });
+// GTK receives native file drops because WebKitGTK restricts file access in page drag events.
+window.clearNativeMediaDrag = clearMediaDrag;
+window.prepareNativeMediaDrop = () => {
+  clearMediaDrag();
+  if (!ensureProjectNamed()) return false;
+  elements.status.textContent = 'Laddar släppta filer…';
+  return true;
+};
+window.finishNativeMediaDrop = (media, failures) => {
+  clearMediaDrag();
+  if (media.length) {
+    openTrackPlacementModal({ type: 'media-import', media, originalPlayhead: state.playhead });
+    elements.status.textContent = 'Välj spår för att slutföra importen.';
+  }
+  if (failures.length) elements.status.textContent = `Kunde inte importera: ${failures.join('; ')}`;
+};
 function syncTranscriptionToggleButtons() {
   const active = elements.burnTranscription.checked;
   for (const button of [elements.toggleTranscription, elements.quickTranscription]) {
@@ -685,7 +738,7 @@ document.querySelector('#export-mp3').addEventListener('click', () => openExport
 document.querySelector('#export-wav').addEventListener('click', () => openExportModal('wav'));
 document.querySelector('#export-quality').addEventListener('input', () => {
   const v = Number(elements.exportQuality.value);
-  const labels = ['', '1 – låg', '2', '3 – standard', '4', '5 – lossless'];
+  const labels = ['', '1 – låg', '2', '3 – standard', '4 – hög', '5 – förlustfri'];
   document.getElementById('quality-label').textContent = labels[v] || String(v);
 });
 elements.transcribe.addEventListener('click', () => {

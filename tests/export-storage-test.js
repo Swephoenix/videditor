@@ -3,7 +3,6 @@
 const assert = require('assert');
 const {
   estimateExportStorageBytes,
-  ensureExportStorage,
   ffmpegFailureMessage
 } = require('../server');
 
@@ -29,23 +28,6 @@ const upscaledRequired = estimateExportStorageBytes({ ...longLosslessProject, up
 assert(
   upscaledRequired > required,
   'Uppskalad export måste reservera mer arbetsutrymme än vanlig export.'
-);
-
-assert.throws(
-  () => ensureExportStorage(longLosslessProject, 1_517_408_256, 0),
-  (error) => error.status === 507 && /ledigt/i.test(error.message) && /behöver/i.test(error.message),
-  'Exporten stoppades inte begripligt innan en full disk.'
-);
-
-assert.doesNotThrow(
-  () => ensureExportStorage(longLosslessProject, required + 1024, 0),
-  'Exporten blockerades trots tillräckligt ledigt utrymme.'
-);
-
-assert.throws(
-  () => ensureExportStorage(longLosslessProject, required * 2, required + 2048),
-  (error) => error.status === 507,
-  'Reserverat utrymme för ett annat exportjobb räknades inte av.'
 );
 
 const diskFull = ffmpegFailureMessage(228, 'Error writing trailer: No space left on device');

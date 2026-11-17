@@ -3,6 +3,7 @@ import socket
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -18,6 +19,14 @@ class ServerTests(unittest.TestCase):
         finally:
             server.stop()
         self.assertIsNotNone(server.process.poll())
+
+    def test_stop_before_start_prevents_server_spawn(self):
+        server = EditorServer()
+        server.stop()
+        with patch('gtk_server.subprocess.Popen') as spawn:
+            with self.assertRaises(RuntimeError):
+                server.start()
+        spawn.assert_not_called()
 
     def test_failed_start_reports_error(self):
         server = EditorServer(node='/missing/node')

@@ -2082,3 +2082,5 @@ body.drag-over::after {
   z-index: 9999;
   pointer-events: none;
 }
+
+.quality-storage-hint { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; }
